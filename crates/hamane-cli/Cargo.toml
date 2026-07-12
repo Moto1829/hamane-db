@@ -1,0 +1,19 @@
+[package]
+name = "hamane-cli"
+description = "Command line interface for hamane-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "hamane"
+path = "src/main.rs"
+
+[dependencies]
+hamane = { path = "../hamane" }
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
