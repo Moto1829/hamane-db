@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hamane-core",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Moto1829/hamane-db"
+
+[workspace.dependencies]
+hamane-core = { path = "crates/hamane-core" }
+thiserror = "2"
+
+# HNSW 構築・再現率テストが debug ビルドでは遅すぎるため最適化を有効にする
+[profile.test]
+opt-level = 2
+
+[profile.dev]
+opt-level = 1

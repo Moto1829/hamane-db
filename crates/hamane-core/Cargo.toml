@@ -1,0 +1,17 @@
+[package]
+name = "hamane-core"
+description = "Core types and distance kernels for hamane-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "distance"
+harness = false
