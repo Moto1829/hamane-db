@@ -1,0 +1,17 @@
+[package]
+name = "hamane"
+description = "An embeddable vector database engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hamane-core = { workspace = true }
+hamane-index = { workspace = true }
+hamane-storage = { workspace = true }
+
+[dev-dependencies]
+rand = "0.9"
+proptest = "1"
+tempfile = "3"
