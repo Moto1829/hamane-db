@@ -7,7 +7,9 @@ Rust 製の組み込み型ベクトルデータベースエンジン。
 - **フィルタ**: メタデータ条件つき検索 (選択率に応じて pre/post filter を自動選択)
 - **距離**: L2 / コサイン / 内積 (NEON / AVX2 の SIMD カーネル)
 
-設計は [docs/DESIGN.md](docs/DESIGN.md)、実装タスクは [todos/](todos/) を参照。
+- **仕様書**: [docs/spec/](docs/spec/) (mdBook。`mdbook serve docs/spec` でローカル閲覧、
+  GitHub Pages で公開)
+- 設計の背景: [docs/DESIGN.md](docs/DESIGN.md) / 実装タスク: [todos/](todos/)
 
 ## ライブラリとして使う
 

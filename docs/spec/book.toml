@@ -1,0 +1,12 @@
+[book]
+title = "hamane-db 仕様書"
+description = "Rust 製組み込み型ベクトルデータベースエンジン hamane-db の仕様"
+authors = ["hamane-db contributors"]
+language = "ja"
+src = "src"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/Moto1829/hamane-db"
+edit-url-template = "https://github.com/Moto1829/hamane-db/edit/main/docs/spec/{path}"
