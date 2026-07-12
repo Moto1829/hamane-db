@@ -80,8 +80,34 @@ M4 完了条件: 長時間書き込みでディスク使用量が収束 (401 の
 - 402 は 307 (SIFT1M ベースライン) を待たず先行実施。結果は docs/benchmarks.md
   (dim768 で l2 1.7x / dot 2.2x。目標 2x は dot のみ達成、l2 はメモリ帯域律速)
 
-## 残タスク
+M0〜M4 の全タスク完了 (2026-07-12)。以降は次フェーズ。
 
-なし — M0〜M4 の全タスク完了 (2026-07-12)。今後の候補は docs/benchmarks.md の
-「課題」節 (HNSW 構築の並列化、extendCandidates のパラメータ化) と
-DESIGN.md §4 の将来拡張 (量子化、IVF)。
+## M5: 性能とスケーラビリティ (2026-07-13 計画)
+
+実測で判明した課題への対処。**運用上の最優先は 504** (フラッシュ/コンパクション中に
+書き込みが分単位で停止する問題)、性能の最優先は 501 (構築 24 分)。
+
+| # | タスク | Depends |
+|---|---|---|
+| [501](501-parallel-hnsw-build.md) | HNSW 構築の並列化 (1M を 5 分以内に) | — |
+| [502](502-build-params-tuning.md) | extendCandidates のパラメータ化と構築コスト削減 | 307 |
+| [503](503-parallel-search.md) | 検索のソース並列化と live_len の O(1) 化 | — |
+| [504](504-background-maintenance.md) | バックグラウンドフラッシュ・コンパクション | 501 |
+| [505](505-group-commit.md) | WAL group commit (SyncPolicy::Batch) | — |
+| [506](506-tiered-compaction.md) | size-tiered 部分コンパクション | 504 |
+| [507](507-api-polish.md) | API 品質の小改善バックログ | — |
+
+M5 完了条件: SIFT1M 構築が 8 コアで 300 秒以内 (501)、かつ
+フラッシュ/コンパクション中の upsert p99 < 10ms (504)。
+
+## M6: 機能拡張とエコシステム
+
+| # | タスク | Depends |
+|---|---|---|
+| [601](601-string-ids.md) | 文字列 ID 対応 | — |
+| [602](602-sq8-quantization.md) | スカラー量子化 (SQ8) + 再ランク | 307 |
+| [603](603-http-server.md) | hamane-server (HTTP API) | 504 |
+| [604](604-python-bindings.md) | Python バインディング (pyo3) | — |
+
+推奨着手順: 501 → 504 (M5 コア) を先に。502/503/505/507 は独立に並行可。
+M6 は用途次第 (Python から使うなら 601 → 604、サービス化なら 603)。
