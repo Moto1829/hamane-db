@@ -1,0 +1,15 @@
+[package]
+name = "hamane-bench"
+description = "SIFT1M benchmark harness for hamane-db (todos/307)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "hamane-bench"
+path = "src/main.rs"
+
+[dependencies]
+hamane = { path = "../hamane" }
+clap = { version = "4", features = ["derive"] }

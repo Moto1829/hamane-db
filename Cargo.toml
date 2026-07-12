@@ -6,6 +6,7 @@ members = [
     "crates/hamane-storage",
     "crates/hamane",
     "crates/hamane-cli",
+    "crates/hamane-bench",
 ]
 
 [workspace.package]
