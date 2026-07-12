@@ -1,0 +1,16 @@
+[package]
+name = "hamane-storage"
+description = "Durable storage (WAL, segments, manifest) for hamane-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hamane-core = { workspace = true }
+hamane-index = { workspace = true }
+crc32c = { workspace = true }
+memmap2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
