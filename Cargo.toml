@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/hamane-core",
+    "crates/hamane-index",
 ]
 
 [workspace.package]
@@ -12,6 +13,7 @@ repository = "https://github.com/Moto1829/hamane-db"
 
 [workspace.dependencies]
 hamane-core = { path = "crates/hamane-core" }
+hamane-index = { path = "crates/hamane-index" }
 thiserror = "2"
 
 # HNSW 構築・再現率テストが debug ビルドでは遅すぎるため最適化を有効にする

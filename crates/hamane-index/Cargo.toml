@@ -1,0 +1,11 @@
+[package]
+name = "hamane-index"
+description = "Vector index implementations (Flat, HNSW) for hamane-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hamane-core = { workspace = true }
+rand = "0.9"
