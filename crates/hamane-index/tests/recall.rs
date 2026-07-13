@@ -87,6 +87,34 @@ fn recall_at_10_clustered() {
     assert!(recall >= 0.95, "clustered: recall@10 = {recall:.3}");
 }
 
+/// Cosine (正規化済みベクトル) と Dot でも recall が出ること (todo 507)。
+#[test]
+fn recall_at_10_cosine_and_dot() {
+    let mut rng = StdRng::seed_from_u64(3307);
+    // Cosine 相当: L2 正規化したベクトルの Dot (挿入時正規化と同じ状態)
+    let mut vecs = uniform(4000, 32, &mut rng);
+    let mut queries = uniform(100, 32, &mut rng);
+    for v in vecs.iter_mut().chain(queries.iter_mut()) {
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        for x in v.iter_mut() {
+            *x /= norm;
+        }
+    }
+    let recall = measure_recall(&vecs, &queries, Metric::Dot, HnswParams::default(), 64, 10);
+    assert!(
+        recall >= 0.95,
+        "cosine(normalized dot): recall@10 = {recall:.3}"
+    );
+
+    // 生の Dot (MIPS)。HNSW は内積では三角不等式が成り立たず本質的に難しいが、
+    // 一様データでは実用的な再現率が出ることを確認する
+    let mut rng = StdRng::seed_from_u64(4307);
+    let vecs = uniform(4000, 32, &mut rng);
+    let queries = uniform(100, 32, &mut rng);
+    let recall = measure_recall(&vecs, &queries, Metric::Dot, HnswParams::default(), 128, 10);
+    assert!(recall >= 0.85, "raw dot (MIPS): recall@10 = {recall:.3}");
+}
+
 #[test]
 fn recall_improves_with_ef() {
     let mut rng = StdRng::seed_from_u64(2303);

@@ -129,8 +129,13 @@ impl WalRecord {
 pub enum SyncPolicy {
     /// sync() 呼び出しごとに必ず fsync (既定)
     Always,
-    /// n 回の sync() 呼び出しに 1 回 fsync
+    /// n 回の sync() 呼び出しに 1 回 fsync。
+    /// クラッシュで直近最大 n−1 件の確認応答済み書き込みを失い得る
     EveryN(u32),
+    /// group commit: 並行する書き込みの fsync を 1 回にまとめる (todo 505)。
+    /// fsync 完了までは呼び出し元に Ok が返らないため、確認応答済みの
+    /// 書き込みは常に永続 (Always と同じ耐久性で、並行時のみ高速)
+    Batch,
 }
 
 /// WAL ファイル名: `<seq:020>.wal`
@@ -159,12 +164,69 @@ pub fn list_wal_files(dir: &Path) -> Result<Vec<(u64, PathBuf)>> {
     Ok(files)
 }
 
+/// group commit の進行状態 (SyncPolicy::Batch)。
+#[derive(Default)]
+struct BatchState {
+    /// 追記済み (未 fsync を含む) のレコード数
+    appended: u64,
+    /// fsync で永続化済みのレコード数
+    synced: u64,
+    /// いずれかのスレッドが fsync 実行中か
+    syncing: bool,
+}
+
+/// WAL ファイルの共有ハンドル。SyncToken が WalWriter より長生きできるよう
+/// Arc で共有する (rotate 後も未完了の fsync 待ちを解決できる)。
+struct WalFile {
+    file: File,
+    batch: std::sync::Mutex<BatchState>,
+    cond: std::sync::Condvar,
+}
+
+/// Batch モードの fsync 待ちチケット。`wait()` は自分の書き込みが
+/// 永続化されるまでブロックする (leader-follower group commit:
+/// 最初に到達したスレッドが fsync を実行し、後続はその完了に相乗りする)。
+pub struct SyncToken {
+    file: Arc<WalFile>,
+    seq: u64,
+}
+
+impl SyncToken {
+    /// 自分の書き込みを含む fsync の完了を待つ。Ok = 永続化済み。
+    pub fn wait(self) -> Result<()> {
+        let mut batch = self.file.batch.lock().expect("lock poisoned");
+        loop {
+            if batch.synced >= self.seq {
+                return Ok(());
+            }
+            if !batch.syncing {
+                // 自分が leader になり、この時点までの追記をまとめて fsync する
+                batch.syncing = true;
+                let target = batch.appended;
+                drop(batch);
+                let result = self.file.file.sync_data();
+                batch = self.file.batch.lock().expect("lock poisoned");
+                batch.syncing = false;
+                if result.is_ok() {
+                    batch.synced = batch.synced.max(target);
+                }
+                self.file.cond.notify_all();
+                result?;
+            } else {
+                batch = self.file.cond.wait(batch).expect("lock poisoned");
+            }
+        }
+    }
+}
+
 /// WAL の追記ライタ。
 pub struct WalWriter {
-    file: File,
+    inner: Arc<WalFile>,
     policy: SyncPolicy,
     unsynced: u32,
 }
+
+use std::sync::Arc;
 
 impl WalWriter {
     /// 新しい WAL ファイルを作成する (既存ファイルはエラー)。
@@ -173,33 +235,52 @@ impl WalWriter {
         file.write_all(&MAGIC_WAL)?;
         file.sync_data()?;
         Ok(Self {
-            file,
+            inner: Arc::new(WalFile {
+                file,
+                batch: std::sync::Mutex::new(BatchState::default()),
+                cond: std::sync::Condvar::new(),
+            }),
             policy,
             unsynced: 0,
         })
     }
 
-    /// レコードを追記する。sync() まで永続化は保証されない。
+    /// レコードを追記する。sync() (Batch では token の wait()) まで永続化は保証されない。
     pub fn append(&mut self, record: &WalRecord) -> Result<()> {
         let mut frame = Vec::new();
         put_frame(&mut frame, &record.encode());
-        self.file.write_all(&frame)?;
+        (&self.inner.file).write_all(&frame)?;
+        self.inner.batch.lock().expect("lock poisoned").appended += 1;
         Ok(())
     }
 
-    /// ポリシーに従って fsync する。Ok が返れば append 済みレコードは永続。
-    pub fn sync(&mut self) -> Result<()> {
+    /// ポリシーに従って fsync する。
+    ///
+    /// - Always / EveryN: この呼び出し内で完結し、None を返す
+    /// - Batch: fsync せずトークンを返す。呼び出し側は**ロックの外で**
+    ///   `token.wait()` を呼ぶこと (そこで group commit される)
+    pub fn sync(&mut self) -> Result<Option<SyncToken>> {
         match self.policy {
-            SyncPolicy::Always => self.file.sync_data()?,
+            SyncPolicy::Always => {
+                self.inner.file.sync_data()?;
+                Ok(None)
+            }
             SyncPolicy::EveryN(n) => {
                 self.unsynced += 1;
                 if self.unsynced >= n {
-                    self.file.sync_data()?;
+                    self.inner.file.sync_data()?;
                     self.unsynced = 0;
                 }
+                Ok(None)
+            }
+            SyncPolicy::Batch => {
+                let seq = self.inner.batch.lock().expect("lock poisoned").appended;
+                Ok(Some(SyncToken {
+                    file: Arc::clone(&self.inner),
+                    seq,
+                }))
             }
         }
-        Ok(())
     }
 }
 

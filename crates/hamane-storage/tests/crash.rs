@@ -147,7 +147,10 @@ fn stale_wal_after_manifest_switch_is_ignored() {
     let store = open(dir.path());
     let view = store.view(cid).unwrap();
     assert_eq!(view.live_len(), 1);
-    assert!(view.memtable.is_empty(), "stale WAL must not be replayed");
+    assert!(
+        view.memtables()[0].is_empty(),
+        "stale WAL must not be replayed"
+    );
     // 旧 WAL は掃除されている
     assert!(!dir.path().join("wal").join(wal_file_name(1)).exists());
 }

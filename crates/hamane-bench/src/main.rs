@@ -38,6 +38,15 @@ struct Args {
     /// フラッシュ閾値 (バイト)。既定はフラッシュ 1 回になる十分大きな値
     #[arg(long, default_value_t = usize::MAX)]
     flush_threshold: usize,
+    /// HNSW 構築の extendCandidates を無効化する (todo 502 の比較用)
+    #[arg(long)]
+    no_extend: bool,
+    /// HNSW の ef_construction (既定 200)
+    #[arg(long, default_value_t = 200)]
+    ef_construction: usize,
+    /// HNSW 構築スレッド数 (0 = 自動)
+    #[arg(long, default_value_t = 0)]
+    build_threads: usize,
 }
 
 /// .fvecs: 各ベクトルが「次元数 d (i32 LE) + f32×d」の繰り返し。
@@ -158,9 +167,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         StoreOptions {
             sync: SyncPolicy::EveryN(u32::MAX),
             flush_threshold_bytes: args.flush_threshold,
+            hnsw: hamane::HnswParams {
+                extend_candidates: !args.no_extend,
+                ef_construction: args.ef_construction,
+                build_threads: args.build_threads,
+                ..Default::default()
+            },
             ..Default::default()
         },
     )?;
+    eprintln!(
+        "hnsw: extend_candidates={}, ef_construction={}, build_threads={}",
+        !args.no_extend, args.ef_construction, args.build_threads
+    );
     let col = db.create_collection(
         "sift",
         CollectionConfig {

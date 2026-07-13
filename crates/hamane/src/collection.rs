@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use hamane_core::{normalize, Filter, HamaneError, Id, Metadata, Metric, Record, Result};
+use hamane_core::{normalize, Filter, HamaneError, Id, Metadata, Metric, Record, RecordId, Result};
 use hamane_index::{search_flat, search_hnsw};
 use hamane_storage::{LiveView, Segment, Store, StoredRecord};
 
@@ -14,7 +14,9 @@ const MAX_OVERSAMPLE: f32 = 4.0;
 /// Collection 作成時の設定。次元数と距離関数は作成後変更できない。
 #[derive(Debug, Clone, Copy)]
 pub struct CollectionConfig {
+    /// ベクトルの次元数 (必須、> 0)
     pub dim: usize,
+    /// 距離関数 (既定: Cosine)
     pub metric: Metric,
 }
 
@@ -28,12 +30,25 @@ impl Default for CollectionConfig {
 }
 
 /// 検索結果 1 件。score の意味はメトリック依存
-/// (L2 は距離 = 小さいほど近い、Cosine/Dot は類似度 = 大きいほど近い)。
+/// (L2 = 距離 = 小さいほど近い、Cosine/Dot = 類似度 = 大きいほど近い)。
 #[derive(Debug, Clone)]
 pub struct SearchHit {
+    /// 内部レコード ID (u64)
     pub id: Id,
+    /// 距離スコア (L2 = 距離、Cosine/Dot = 類似度)
     pub score: f32,
+    /// レコードのメタデータ
     pub metadata: Metadata,
+}
+
+impl SearchHit {
+    /// このレコードが文字列 ID で挿入されていた場合、その文字列 ID。
+    pub fn ext_id(&self) -> Option<&str> {
+        match self.metadata.get(hamane_core::EXT_ID_META_KEY) {
+            Some(hamane_core::MetaValue::Str(s)) => Some(s),
+            _ => None,
+        }
+    }
 }
 
 /// 次元数・距離関数を固定したベクトルの集合。
@@ -72,15 +87,17 @@ impl Collection {
         }
     }
 
+    /// Collection 名。
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// 作成時の設定 (dim / metric)。
     pub fn config(&self) -> CollectionConfig {
         self.config
     }
 
-    /// live なレコード数。セグメント走査を伴うため O(総行数)。
+    /// live なレコード数 (O(1)。Store が書き込みごとに差分維持)。
     pub fn len(&self) -> usize {
         self.store
             .view(self.collection_id)
@@ -88,21 +105,17 @@ impl Collection {
             .unwrap_or(0)
     }
 
+    /// live なレコードが 1 件もないか。
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// レコードを挿入する。同一 ID が存在する場合は置き換える。
+    ///
+    /// 文字列 ID (`Record::new("uuid", ...)`) は collection 内部の辞書で
+    /// u64 に対応づけられ、`_ext_id` メタデータとして永続化される。
     pub fn upsert(&self, record: Record) -> Result<()> {
-        let vector = self.prepare_vector(record.vector)?;
-        self.store.upsert(
-            self.collection_id,
-            record.id,
-            StoredRecord {
-                vector,
-                metadata: record.metadata,
-            },
-        )
+        self.upsert_batch(vec![record])
     }
 
     /// 複数レコードを 1 回の WAL sync でまとめて挿入する。
@@ -118,24 +131,30 @@ impl Collection {
                 },
             ));
         }
-        self.store.upsert_batch(self.collection_id, prepared)
+        self.store
+            .upsert_batch_records(self.collection_id, prepared)
     }
 
-    /// レコードを削除する。存在した場合 true を返す。
-    pub fn delete(&self, id: Id) -> Result<bool> {
-        let existed = self.store.view(self.collection_id)?.get(id).is_some();
-        self.store.delete(self.collection_id, id)?;
-        Ok(existed)
+    /// レコードを削除する。存在した場合 true を返す (判定と削除は原子的)。
+    /// u64 と文字列 ID のどちらも受け付ける。
+    pub fn delete(&self, id: impl Into<RecordId>) -> Result<bool> {
+        self.store.delete_record(self.collection_id, &id.into())
     }
 
     /// ID でレコードを取得する。Cosine の場合ベクトルは正規化済みの値を返す。
-    pub fn get(&self, id: Id) -> Option<Record> {
+    /// u64 と文字列 ID のどちらも受け付ける。
+    pub fn get(&self, id: impl Into<RecordId>) -> Option<Record> {
+        let rid = id.into();
+        let internal = match &rid {
+            RecordId::Num(n) => *n,
+            RecordId::Str(s) => self.store.resolve_ext_id(self.collection_id, s).ok()??,
+        };
         self.store
             .view(self.collection_id)
             .ok()?
-            .get(id)
+            .get(internal)
             .map(|r| Record {
-                id,
+                id: rid,
                 vector: r.vector,
                 metadata: r.metadata,
             })
@@ -144,6 +163,11 @@ impl Collection {
     /// memtable をセグメントへ書き出す (DB 全体のフラッシュ)。
     pub fn flush(&self) -> Result<()> {
         self.store.flush()
+    }
+
+    /// セグメント構成の要約 (新しい順)。デバッグ・監視用。
+    pub fn segment_stats(&self) -> Result<Vec<hamane_storage::SegmentStats>> {
+        Ok(self.store.view(self.collection_id)?.segment_stats())
     }
 
     /// 検索クエリのビルダーを返す。
@@ -194,17 +218,55 @@ impl Collection {
         let view: LiveView = self.store.view(self.collection_id)?;
         let ef = ef.unwrap_or(self.store.options().hnsw.ef_search);
 
-        // (比較キー, id) を全ソースから収集。rank = 0 が memtable、1 以降が新しい順のセグメント
+        // (比較キー, id) を全ソースから収集。
+        // rank: 0..memtables().len() が memtable 列 (active + フラッシュ待ち)、
+        // それ以降が新しい順のセグメント
         let mut candidates: Vec<(f32, Id)> = Vec::new();
 
-        // memtable のエントリは常に最新なので live 判定不要
-        for h in search_flat(view.memtable.iter(), &query, k, metric, filter) {
-            candidates.push((metric.key_from_score(h.score), h.id));
+        for (rank, mt) in view.memtables().iter().enumerate() {
+            for h in search_flat(mt.iter(), &query, k, metric, filter) {
+                // rank 0 (active) は常に最新。フラッシュ待ちは active に shadow され得る
+                if rank == 0 || view.is_live(h.id, rank) {
+                    candidates.push((metric.key_from_score(h.score), h.id));
+                }
+            }
         }
 
-        for (i, seg) in view.segments.iter().enumerate() {
-            let rank = i + 1;
-            candidates.extend(self.search_segment(&view, rank, seg, &query, k, ef, filter)?);
+        // セグメント間は並列に検索する (todo 503)。1 個以下ならスレッドを立てない
+        let rank_base = view.memtables().len();
+        if view.segments.len() <= 1 {
+            for (i, seg) in view.segments.iter().enumerate() {
+                candidates.extend(self.search_segment(
+                    &view,
+                    rank_base + i,
+                    seg,
+                    &query,
+                    k,
+                    ef,
+                    filter,
+                )?);
+            }
+        } else {
+            let per_segment: Vec<Result<Vec<(f32, Id)>>> = std::thread::scope(|scope| {
+                let (view, query) = (&view, query.as_slice());
+                let handles: Vec<_> = view
+                    .segments
+                    .iter()
+                    .enumerate()
+                    .map(|(i, seg)| {
+                        scope.spawn(move || {
+                            self.search_segment(view, rank_base + i, seg, query, k, ef, filter)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("segment search thread panicked"))
+                    .collect()
+            });
+            for result in per_segment {
+                candidates.extend(result?);
+            }
         }
 
         // live 判定済みなので id 重複はない。キー昇順 (近い順) に k 件

@@ -23,11 +23,16 @@
 //! 永続化するには `Database::in_memory()` の代わりに `Database::open(path)` を使う。
 //! 書き込みは WAL で保護され、クラッシュ後の再 open で復元される。
 
+#![warn(missing_docs)]
+
 mod collection;
 mod database;
 
 pub use collection::{Collection, CollectionConfig, SearchBuilder, SearchHit};
 pub use database::Database;
-pub use hamane_core::{Filter, HamaneError, Id, MetaValue, Metadata, Metric, Record, Result};
+pub use hamane_core::{
+    Filter, HamaneError, Id, MetaValue, Metadata, Metric, Record, RecordId, Result, EXT_ID_BASE,
+    EXT_ID_META_KEY,
+};
 pub use hamane_index::HnswParams;
-pub use hamane_storage::{StoreOptions, SyncPolicy};
+pub use hamane_storage::{SegmentStats, StoreOptions, SyncPolicy};

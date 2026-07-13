@@ -100,6 +100,10 @@ impl SegmentWriter {
         if tmp_dir.exists() {
             std::fs::remove_dir_all(&tmp_dir)?;
         }
+        // 前回の失敗 (フラッシュ再試行) の残骸。manifest 未参照なので消して安全
+        if final_dir.exists() {
+            std::fs::remove_dir_all(&final_dir)?;
+        }
         std::fs::create_dir_all(&tmp_dir)?;
 
         // 行順 = id 昇順

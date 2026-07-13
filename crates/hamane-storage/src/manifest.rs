@@ -34,7 +34,9 @@ pub struct CollectionEntry {
     pub name: String,
     pub dim: u32,
     pub metric: Metric,
-    /// seg_id 昇順で保持する (読み込み時に検証)
+    /// **年代順 (古い → 新しい)** で保持する (フォーマット v2、todo 506)。
+    /// 部分コンパクション後は seg_id 順と一致しない。
+    /// v1 (seg_id 昇順 = 年代順だった) はそのまま読める
     pub segments: Vec<SegmentEntry>,
 }
 
@@ -48,10 +50,13 @@ pub struct Manifest {
     pub collections: Vec<CollectionEntry>,
 }
 
+/// v2 の magic (年代順セグメントリスト)。v1 (`MAGIC_MANIFEST`) も読める。
+const MAGIC_MANIFEST_V2: [u8; 8] = *b"HAMANEF\x02";
+
 impl Manifest {
     fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.extend_from_slice(&MAGIC_MANIFEST);
+        buf.extend_from_slice(&MAGIC_MANIFEST_V2);
         format::put_u64(&mut buf, self.gen);
         format::put_u32(&mut buf, self.next_collection_id);
         format::put_u64(&mut buf, self.next_seg_id);
@@ -75,9 +80,12 @@ impl Manifest {
     }
 
     fn decode(buf: &[u8]) -> Result<Self> {
-        if buf.len() < MAGIC_MANIFEST.len() + 4 || buf[..8] != MAGIC_MANIFEST {
+        if buf.len() < MAGIC_MANIFEST.len() + 4
+            || (buf[..8] != MAGIC_MANIFEST && buf[..8] != MAGIC_MANIFEST_V2)
+        {
             return Err(corrupted("bad manifest magic"));
         }
+        let is_v1 = buf[..8] == MAGIC_MANIFEST;
         let (content, footer) = buf.split_at(buf.len() - 4);
         let stored = u32::from_le_bytes(footer.try_into().unwrap());
         if crc32c::crc32c(content) != stored {
@@ -104,8 +112,11 @@ impl Manifest {
                     tombstone_count: r.u64()?,
                 });
             }
-            if !segments.windows(2).all(|w| w[0].seg_id < w[1].seg_id) {
-                return Err(corrupted("segments not in ascending seg_id order"));
+            // v1 は「seg_id 昇順 = 年代順」の不変条件を検証する。
+            // v2 は年代順リストであり seg_id 順とは限らない (部分マージの結果が
+            // 古い位置に入るため)
+            if is_v1 && !segments.windows(2).all(|w| w[0].seg_id < w[1].seg_id) {
+                return Err(corrupted("v1 segments not in ascending seg_id order"));
             }
             collections.push(CollectionEntry {
                 collection_id,

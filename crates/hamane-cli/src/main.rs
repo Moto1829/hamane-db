@@ -152,6 +152,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .map(|h| {
                     json!({
                         "id": h.id,
+                        "ext_id": h.ext_id(),
                         "score": h.score,
                         "meta": meta_to_json(&h.metadata),
                     })
@@ -177,6 +178,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         "dim": config.dim,
                         "metric": format!("{:?}", config.metric),
                         "len": col.len(),
+                        "segments": col
+                            .segment_stats()
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|s| json!({
+                                "seg_id": s.seg_id,
+                                "rows": s.record_count,
+                                "tombstones": s.tombstone_count,
+                                "hnsw": s.has_hnsw,
+                            }))
+                            .collect::<Vec<_>>(),
                     })
                 })
                 .collect();
@@ -198,10 +210,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 fn parse_record(line: &str) -> Result<Record, Box<dyn std::error::Error>> {
     let v: Value = serde_json::from_str(line)?;
-    let id = v
-        .get("id")
-        .and_then(Value::as_u64)
-        .ok_or("record needs numeric \"id\"")?;
+    let id: hamane::RecordId = match v.get("id") {
+        Some(Value::Number(n)) => {
+            hamane::RecordId::Num(n.as_u64().ok_or("\"id\" must be a non-negative integer")?)
+        }
+        Some(Value::String(s)) => hamane::RecordId::Str(s.clone()),
+        _ => return Err("record needs \"id\" (non-negative integer or string)".into()),
+    };
     let vector: Vec<f32> = v
         .get("vector")
         .and_then(Value::as_array)
@@ -334,7 +349,7 @@ mod tests {
     fn parse_record_full() {
         let r = parse_record(r#"{"id": 7, "vector": [0.5, -1], "meta": {"lang": "ja", "year": 2026, "public": true}}"#)
             .unwrap();
-        assert_eq!(r.id, 7);
+        assert_eq!(r.id, hamane::RecordId::Num(7));
         assert_eq!(r.vector, vec![0.5, -1.0]);
         assert_eq!(r.metadata.get("lang"), Some(&MetaValue::Str("ja".into())));
         assert_eq!(r.metadata.get("year"), Some(&MetaValue::Int(2026)));
