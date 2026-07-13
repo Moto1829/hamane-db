@@ -9,6 +9,11 @@ members = [
     "crates/hamane-bench",
     "crates/hamane-server",
 ]
+exclude = [
+    # pyo3 拡張モジュール。maturin で独立にビルドする (cargo test --workspace が
+    # Python 環境に依存しないよう workspace から外す)
+    "crates/hamane-py",
+]
 
 [workspace.package]
 version = "0.1.0"
