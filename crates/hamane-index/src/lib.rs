@@ -8,7 +8,8 @@ pub mod hnsw;
 
 pub use flat::search_flat;
 pub use hnsw::{
-    search_hnsw, HnswBuilder, HnswGraph, HnswParams, HnswView, SliceSource, VectorSource,
+    search_hnsw, search_hnsw_by, HnswBuilder, HnswGraph, HnswParams, HnswView, SliceSource,
+    VectorSource,
 };
 
 use hamane_core::Id;

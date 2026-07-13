@@ -7,6 +7,7 @@ mod error;
 mod filter;
 mod metric;
 mod record;
+pub mod sq8;
 
 pub use error::HamaneError;
 pub use filter::Filter;

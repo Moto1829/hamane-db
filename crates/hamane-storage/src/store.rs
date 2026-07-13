@@ -37,6 +37,9 @@ pub struct StoreOptions {
     pub hnsw_min_rows: usize,
     /// collection のセグメント数がこの値以上になったら自動コンパクション
     pub compaction_threshold: usize,
+    /// SQ8 量子化 (todo 602)。有効にすると HNSW 探索の距離計算が u8 になり
+    /// メモリ帯域を節約する。結果は f32 で再ランクされ recall を保つ
+    pub sq8: bool,
 }
 
 impl Default for StoreOptions {
@@ -47,6 +50,7 @@ impl Default for StoreOptions {
             hnsw: HnswParams::default(),
             hnsw_min_rows: 1024,
             compaction_threshold: 4,
+            sq8: false,
         }
     }
 }
@@ -1054,6 +1058,7 @@ impl Shared {
                 metric: *metric,
                 params: self.options.hnsw,
                 min_rows: self.options.hnsw_min_rows,
+                sq8: self.options.sq8,
             };
             let meta = SegmentWriter::write(&dir, *seg_id, memtable, Some(spec))?;
             entries.push((
@@ -1217,6 +1222,7 @@ impl Shared {
                 metric,
                 params: self.options.hnsw,
                 min_rows: self.options.hnsw_min_rows,
+                sq8: self.options.sq8,
             };
             SegmentWriter::write(&dir, seg_id, &merged.snapshot(), Some(spec))?;
             Some(SegmentEntry {

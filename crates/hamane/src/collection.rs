@@ -10,6 +10,8 @@ use hamane_storage::{LiveView, Segment, Store, StoredRecord};
 const FILTER_SAMPLE_SIZE: usize = 1000;
 const PRE_FILTER_SELECTIVITY: f64 = 0.05;
 const MAX_OVERSAMPLE: f32 = 4.0;
+/// SQ8 の 2 段階検索で量子化距離により取得する候補の倍率 (todo 602)
+const SQ8_RERANK_FACTOR: usize = 4;
 
 /// Collection 作成時の設定。次元数と距離関数は作成後変更できない。
 #[derive(Debug, Clone, Copy)]
@@ -326,7 +328,31 @@ impl Collection {
         };
 
         let Some(filter) = filter else {
-            // フィルタなし: live マスクのみで HNSW
+            // フィルタなし: live マスクのみで HNSW。
+            // SQ8 があれば量子化距離で k×RERANK 件探索し、f32 で再ランクする (todo 602)
+            if let Some(sq8) = seg.sq8_view()? {
+                let query_codes = sq8.quantize_query(query);
+                let code_sum: u64 = query_codes.iter().map(|&x| x as u64).sum();
+                let dist =
+                    |row: u32| -> f32 { sq8.distance_key(metric, &query_codes, code_sum, row) };
+                let fetch = k * SQ8_RERANK_FACTOR;
+                let hits = hamane_index::search_hnsw_by(
+                    &hview,
+                    n,
+                    &dist,
+                    fetch,
+                    ef.max(fetch),
+                    Some(&live),
+                );
+                // f32 で再ランクして上位 k
+                let mut reranked: Vec<(f32, Id)> = hits
+                    .into_iter()
+                    .map(|(r, _)| (metric.distance_key(query, seg.vector(r)), seg.id(r)))
+                    .collect();
+                reranked.sort_by(|a, b| a.partial_cmp(b).expect("keys are finite"));
+                reranked.truncate(k);
+                return Ok(reranked);
+            }
             let hits = search_hnsw(&hview, seg, metric, query, k, ef, Some(&live));
             return Ok(hits.into_iter().map(|(r, key)| (key, seg.id(r))).collect());
         };

@@ -181,22 +181,22 @@ fn select_heuristic<S: VectorSource + ?Sized>(
 }
 
 /// 1 層内の貪欲探索 (Algorithm 2)。entry_points から始めて ef 幅で探索し、
-/// 近い順 (キー昇順) の候補を返す。
+/// 近い順 (キー昇順) の候補を返す。距離は closure で与える
+/// (f32 のほか SQ8 量子化距離を差し込める。todo 602)。
 ///
 /// `mask` は**結果への採用のみ**を制限する。グラフの走査は全ノードを通す
 /// (走査まで絞るとグラフが分断され再現率が崩れるため。docs/design/index.md §1)。
 #[allow(clippy::too_many_arguments)]
-fn search_layer<G: HnswGraph, S: VectorSource + ?Sized>(
+fn search_layer_by<G: HnswGraph>(
     graph: &G,
-    source: &S,
-    metric: Metric,
-    query: &[f32],
+    node_count: u32,
+    dist: &dyn Fn(u32) -> f32,
     entry_points: &[Keyed],
     level: u8,
     ef: usize,
     mask: Option<&dyn Fn(u32) -> bool>,
 ) -> Vec<Keyed> {
-    let mut visited = Visited::new(source.len());
+    let mut visited = Visited::new(node_count);
     // candidates: 近い順に取り出す min-heap / results: 遠いものから溢れる max-heap
     let mut candidates: BinaryHeap<std::cmp::Reverse<Keyed>> = BinaryHeap::new();
     let mut results: BinaryHeap<Keyed> = BinaryHeap::new();
@@ -225,7 +225,7 @@ fn search_layer<G: HnswGraph, S: VectorSource + ?Sized>(
             if !visited.insert(nb) {
                 continue;
             }
-            let key = metric.distance_key(query, source.vector(nb));
+            let key = dist(nb);
             let furthest_key = results.peek().map(|k| k.key).unwrap_or(f32::INFINITY);
             if results.len() < ef || key < furthest_key {
                 candidates.push(std::cmp::Reverse(Keyed { key, node: nb }));
@@ -239,6 +239,22 @@ fn search_layer<G: HnswGraph, S: VectorSource + ?Sized>(
         }
     }
     results.into_sorted_vec()
+}
+
+/// f32 ベクトルソース用の search_layer (既存経路)。
+#[allow(clippy::too_many_arguments)]
+fn search_layer<G: HnswGraph, S: VectorSource + ?Sized>(
+    graph: &G,
+    source: &S,
+    metric: Metric,
+    query: &[f32],
+    entry_points: &[Keyed],
+    level: u8,
+    ef: usize,
+    mask: Option<&dyn Fn(u32) -> bool>,
+) -> Vec<Keyed> {
+    let dist = |nb: u32| metric.distance_key(query, source.vector(nb));
+    search_layer_by(graph, source.len(), &dist, entry_points, level, ef, mask)
 }
 
 /// 最上層から target_level+1 層まで ef=1 で降下し、entry point を更新する。
@@ -286,6 +302,20 @@ pub fn search_hnsw<G: HnswGraph, S: VectorSource + ?Sized>(
     ef: usize,
     mask: Option<&dyn Fn(u32) -> bool>,
 ) -> Vec<(u32, f32)> {
+    let dist = |nb: u32| metric.distance_key(query, source.vector(nb));
+    search_hnsw_by(graph, source.len(), &dist, k, ef, mask)
+}
+
+/// 距離 closure による k 近傍探索。SQ8 などの量子化距離を差し込む用 (todo 602)。
+/// `dist(row)` は「小さいほど近い」比較キーを返すこと。
+pub fn search_hnsw_by<G: HnswGraph>(
+    graph: &G,
+    node_count: u32,
+    dist: &dyn Fn(u32) -> f32,
+    k: usize,
+    ef: usize,
+    mask: Option<&dyn Fn(u32) -> bool>,
+) -> Vec<(u32, f32)> {
     let Some(entry) = graph.entry_point() else {
         return Vec::new();
     };
@@ -293,23 +323,14 @@ pub fn search_hnsw<G: HnswGraph, S: VectorSource + ?Sized>(
         return Vec::new();
     }
     let mut eps = vec![Keyed {
-        key: metric.distance_key(query, source.vector(entry)),
+        key: dist(entry),
         node: entry,
     }];
     for lc in (1..=graph.max_level()).rev() {
-        eps = search_layer(
-            graph,
-            source,
-            metric,
-            query,
-            &eps,
-            lc,
-            EF_UPPER_LAYERS,
-            None,
-        );
+        eps = search_layer_by(graph, node_count, dist, &eps, lc, EF_UPPER_LAYERS, None);
     }
     let ef = ef.max(k);
-    let mut found = search_layer(graph, source, metric, query, &eps, 0, ef, mask);
+    let mut found = search_layer_by(graph, node_count, dist, &eps, 0, ef, mask);
     found.truncate(k);
     found.into_iter().map(|kd| (kd.node, kd.key)).collect()
 }

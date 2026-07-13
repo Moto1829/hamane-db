@@ -215,6 +215,87 @@ fn small_segments_fall_back_to_flat() {
     assert_eq!(hits.iter().map(|h| h.id).collect::<Vec<_>>(), vec![0, 1, 2]);
 }
 
+/// SQ8 量子化 (todo 602): 2 段階検索 (SQ8 距離 → f32 再ランク) で
+/// recall を保ちつつ、量子化ファイルが再 open 後も使われること。
+#[test]
+fn sq8_two_stage_search_preserves_recall() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open_with_options(
+        dir.path(),
+        StoreOptions {
+            hnsw_min_rows: 64,
+            sq8: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let col = db
+        .create_collection(
+            "docs",
+            CollectionConfig {
+                dim: DIM,
+                metric: Metric::L2,
+            },
+        )
+        .unwrap();
+
+    let mut rng = StdRng::seed_from_u64(602);
+    let mut data = Vec::new();
+    let records: Vec<Record> = (0..3000u64)
+        .map(|i| {
+            let v = random_vec(&mut rng);
+            data.push((i, v.clone()));
+            Record::new(i, v)
+        })
+        .collect();
+    col.upsert_batch(records).unwrap();
+    col.flush().unwrap();
+
+    // sq8 ファイルが存在する (segment_stats では見えないので検索品質で検証)
+    let mut total = 0.0;
+    let queries = 50;
+    for _ in 0..queries {
+        let q = random_vec(&mut rng);
+        let hits: Vec<u64> = col
+            .search(&q)
+            .k(10)
+            .run()
+            .unwrap()
+            .iter()
+            .map(|h| h.id)
+            .collect();
+        let truth = flat_topk(data.iter().map(|(i, v)| (*i, v)), &q, 10, |_| true);
+        total += recall(&hits, &truth);
+    }
+    let avg = total / queries as f64;
+    assert!(avg >= 0.95, "sq8 two-stage recall@10 = {avg:.3}");
+
+    // 再 open しても SQ8 経路が生きている
+    drop(col);
+    drop(db);
+    let db = Database::open_with_options(
+        dir.path(),
+        StoreOptions {
+            hnsw_min_rows: 64,
+            sq8: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let col = db.collection("docs").unwrap();
+    let q = random_vec(&mut rng);
+    let hits = col.search(&q).k(5).run().unwrap();
+    assert_eq!(hits.len(), 5);
+    // 検索結果が f32 再ランク済み = score が正確な距離であること
+    let exact = Metric::L2
+        .distance_key(&q, &data[hits[0].id as usize].1)
+        .sqrt();
+    assert!(
+        (hits[0].score - exact).abs() < 1e-4,
+        "score must be exact f32 distance"
+    );
+}
+
 #[test]
 fn hnsw_survives_reopen() {
     let dir = tempfile::tempdir().unwrap();

@@ -13,6 +13,7 @@ pub const MAGIC_META: [u8; 8] = *b"HAMANEM\x01";
 pub const MAGIC_TOMBSTONES: [u8; 8] = *b"HAMANET\x01";
 pub const MAGIC_MANIFEST: [u8; 8] = *b"HAMANEF\x01";
 pub const MAGIC_HNSW: [u8; 8] = *b"HAMANEH\x01";
+pub const MAGIC_SQ8: [u8; 8] = *b"HAMANEQ\x01";
 
 pub fn corrupted(msg: impl Into<String>) -> HamaneError {
     HamaneError::Corrupted(msg.into())

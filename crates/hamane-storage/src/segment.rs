@@ -15,18 +15,20 @@ use memmap2::Mmap;
 
 use crate::format::{
     self, corrupted, put_metadata, read_metadata, Reader, MAGIC_HNSW, MAGIC_IDS, MAGIC_META,
-    MAGIC_TOMBSTONES, MAGIC_VECTORS,
+    MAGIC_SQ8, MAGIC_TOMBSTONES, MAGIC_VECTORS,
 };
 use crate::memtable::MemtableSnapshot;
 
 const VECTORS_HEADER_LEN: usize = 64; // magic[8] + dim u32 + count u64 + pad
 const PLAIN_HEADER_LEN: usize = 16; // magic[8] + count u64
+const SQ8_HEADER_LEN: usize = 64; // magic[8] + dim u32 + count u64 + min f32 + max f32 + pad
 
 pub const FILE_VECTORS: &str = "vectors.bin";
 pub const FILE_IDS: &str = "ids.bin";
 pub const FILE_META: &str = "meta.bin";
 pub const FILE_TOMBSTONES: &str = "tombstones.bin";
 pub const FILE_HNSW: &str = "hnsw.bin";
+pub const FILE_SQ8: &str = "vectors_sq8.bin";
 
 /// フラッシュ時のインデックス構築指定 (docs/design/index.md §4)。
 #[derive(Debug, Clone, Copy)]
@@ -35,6 +37,9 @@ pub struct IndexBuildSpec {
     pub params: HnswParams,
     /// この行数未満のセグメントは HNSW を作らない (Flat で十分)
     pub min_rows: usize,
+    /// SQ8 量子化ベクトル (vectors_sq8.bin) も書く (todo 602)。
+    /// HNSW 探索の距離計算が u8 になり、f32 再ランクと組み合わせて使う
+    pub sq8: bool,
 }
 
 /// 行ベクトル列の VectorSource アダプタ (フラッシュ時の HNSW 構築用)。
@@ -176,6 +181,22 @@ impl SegmentWriter {
                 };
                 let builder = HnswBuilder::build(&source, spec.metric, params);
                 write_file_with_crc(&tmp_dir.join(FILE_HNSW), &builder.serialize())?;
+
+                // vectors_sq8.bin (任意、todo 602): グローバル min/max で u8 量子化
+                if spec.sq8 {
+                    let params = hamane_core::sq8::Sq8Params::fit(rows.iter().map(|(_, v, _)| *v));
+                    let mut buf = Vec::with_capacity(SQ8_HEADER_LEN + rows.len() * dim as usize);
+                    buf.extend_from_slice(&MAGIC_SQ8);
+                    format::put_u32(&mut buf, dim);
+                    format::put_u64(&mut buf, count);
+                    buf.extend_from_slice(&params.min.to_le_bytes());
+                    buf.extend_from_slice(&params.max.to_le_bytes());
+                    buf.resize(SQ8_HEADER_LEN, 0);
+                    for (_, vector, _) in &rows {
+                        params.quantize(vector, &mut buf);
+                    }
+                    write_file_with_crc(&tmp_dir.join(FILE_SQ8), &buf)?;
+                }
             }
         }
 
@@ -245,6 +266,63 @@ pub struct Segment {
     tombstones: MappedFile,
     /// hnsw.bin (存在する場合のみ)。ビューは `hnsw()` で都度パースする
     hnsw: Option<MappedFile>,
+    /// vectors_sq8.bin (存在する場合のみ、todo 602)
+    sq8: Option<MappedFile>,
+}
+
+/// SQ8 量子化ベクトルへの zero-copy ビュー。
+/// `dist_key(query_codes, ...)` で HNSW 探索用の距離クロージャを作る。
+pub struct Sq8View<'a> {
+    dim: usize,
+    params: hamane_core::sq8::Sq8Params,
+    data: &'a [u8],
+}
+
+impl Sq8View<'_> {
+    /// 量子化パラメータ (クエリの量子化に使う)。
+    pub fn params(&self) -> hamane_core::sq8::Sq8Params {
+        self.params
+    }
+
+    /// クエリベクトルを同じスケールで量子化する。
+    pub fn quantize_query(&self, query: &[f32]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(query.len());
+        self.params.quantize(query, &mut out);
+        out
+    }
+
+    /// 行 row の量子化コード。
+    #[inline]
+    pub fn codes(&self, row: u32) -> &[u8] {
+        let start = row as usize * self.dim;
+        &self.data[start..start + self.dim]
+    }
+
+    /// 「小さいほど近い」距離キーを返す (metric.distance_key と同じ意味論の近似)。
+    #[inline]
+    pub fn distance_key(
+        &self,
+        metric: Metric,
+        query_codes: &[u8],
+        query_code_sum: u64,
+        row: u32,
+    ) -> f32 {
+        let s = self.params.scale();
+        match metric {
+            Metric::L2 => {
+                let accum = hamane_core::sq8::sq8_l2_accum(query_codes, self.codes(row));
+                s * s * accum as f32
+            }
+            Metric::Cosine | Metric::Dot => {
+                let (dot_q, sum_b) = hamane_core::sq8::sq8_dot_accum(query_codes, self.codes(row));
+                let min = self.params.min;
+                let dot = self.dim as f32 * min * min
+                    + min * s * (query_code_sum + sum_b) as f32
+                    + s * s * dot_q as f32;
+                -dot
+            }
+        }
+    }
 }
 
 impl VectorSource for Segment {
@@ -278,6 +356,11 @@ impl Segment {
         let tombstones = MappedFile::open(&dir.join(FILE_TOMBSTONES), &MAGIC_TOMBSTONES)?;
         let hnsw = if dir.join(FILE_HNSW).exists() {
             Some(MappedFile::open(&dir.join(FILE_HNSW), &MAGIC_HNSW)?)
+        } else {
+            None
+        };
+        let sq8 = if dir.join(FILE_SQ8).exists() {
+            Some(MappedFile::open(&dir.join(FILE_SQ8), &MAGIC_SQ8)?)
         } else {
             None
         };
@@ -321,12 +404,48 @@ impl Segment {
             meta,
             tombstones,
             hnsw,
+            sq8,
         };
-        // hnsw.bin があれば構造を一度検証しておく (行数の整合含む)
+        // hnsw.bin / vectors_sq8.bin があれば構造を一度検証しておく (行数の整合含む)
         if segment.hnsw.is_some() {
             segment.hnsw()?;
         }
+        if segment.sq8.is_some() {
+            segment.sq8_view()?;
+        }
         Ok(segment)
+    }
+
+    /// SQ8 量子化ベクトルのビューを返す (vectors_sq8.bin がなければ None)。
+    pub fn sq8_view(&self) -> Result<Option<Sq8View<'_>>> {
+        let Some(mapped) = &self.sq8 else {
+            return Ok(None);
+        };
+        let content = mapped.content();
+        if content.len() < SQ8_HEADER_LEN {
+            return Err(corrupted("sq8 header too short"));
+        }
+        let dim = u32::from_le_bytes(content[8..12].try_into().unwrap()) as usize;
+        let count = u64::from_le_bytes(content[12..20].try_into().unwrap()) as usize;
+        let min = f32::from_le_bytes(content[20..24].try_into().unwrap());
+        let max = f32::from_le_bytes(content[24..28].try_into().unwrap());
+        if dim != self.dim || count != self.count {
+            return Err(corrupted("sq8 dim/count mismatch with segment"));
+        }
+        let data = &content[SQ8_HEADER_LEN..];
+        if data.len() != count * dim {
+            return Err(corrupted("sq8 data size mismatch"));
+        }
+        Ok(Some(Sq8View {
+            dim,
+            params: hamane_core::sq8::Sq8Params { min, max },
+            data,
+        }))
+    }
+
+    /// このセグメントが SQ8 量子化ベクトルを持つか。
+    pub fn has_sq8(&self) -> bool {
+        self.sq8.is_some()
     }
 
     /// 全ファイルの CRC を検証する (open 時は省略される)。
@@ -337,6 +456,9 @@ impl Segment {
         self.tombstones.verify_checksum(FILE_TOMBSTONES)?;
         if let Some(h) = &self.hnsw {
             h.verify_checksum(FILE_HNSW)?;
+        }
+        if let Some(q) = &self.sq8 {
+            q.verify_checksum(FILE_SQ8)?;
         }
         Ok(())
     }
