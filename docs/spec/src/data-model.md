@@ -44,13 +44,14 @@ pub struct CollectionConfig {
 |---|---|
 | `upsert(record)` | 挿入。同 id は置き換え |
 | `upsert_batch(records)` | 一括挿入 (WAL 同期 1 回) |
-| `delete(id) -> bool` | 削除。呼び出し前に存在していたら true |
+| `delete(id) -> bool` | 削除。呼び出し前に存在していたら true (判定と削除は原子的) |
 | `get(id) -> Option<Record>` | 点参照 |
 | `search(&query)` | 検索ビルダー ([検索](search.md)) |
-| `len()` / `is_empty()` | 有効レコード数 (O(総行数) — [制限事項](limits.md)) |
+| `len()` / `is_empty()` | 有効レコード数 (O(1)。書き込み時に差分維持) |
+| `segment_stats()` | セグメント構成の要約 (監視・デバッグ用) |
 | `flush()` | DB 全体のフラッシュ (Database::flush と同じ) |
 
-## Record
+## Record と ID
 
 ```rust
 let rec = Record::new(42u64, vec![0.1, 0.2, /* dim 個 */])
@@ -58,12 +59,25 @@ let rec = Record::new(42u64, vec![0.1, 0.2, /* dim 個 */])
     .with_meta("year", 2026)
     .with_meta("score", 0.5)
     .with_meta("public", true);
+
+// 文字列 ID も使える (UUID 等)
+let rec = Record::new("doc-550e8400", vec![0.1, 0.2]);
+col.get("doc-550e8400");
+col.delete("doc-550e8400");
 ```
 
-- **id**: `u64`。Collection 内で一意。同じ id への upsert は置き換え
+- **id**: `u64` または文字列 (`RecordId`)。Collection 内で一意。
+  同じ id への upsert は置き換え
+- **文字列 ID の仕組み**: collection ごとの辞書で内部 u64
+  (`EXT_ID_BASE` = 2^63 以降を採番) に対応づけられ、予約メタデータキー
+  `_ext_id` として永続化される。再 open 時に辞書は自動再構築される。
+  `SearchHit::ext_id()` で検索結果から文字列 ID を取得できる
+- **u64 と文字列の混在**: 可能だが、u64 側は 2^63 未満を使うこと
+  (文字列 ID の採番領域との衝突を避けるため)
 - **vector**: `Vec<f32>`。長さは Collection の `dim` と一致が必須。
   NaN / 無限大を含むとエラー
-- **metadata**: 文字列キー → スカラー値のマップ。値の型は 4 種:
+- **metadata**: 文字列キー → スカラー値のマップ (`_ext_id` キーは予約)。
+  値の型は 4 種:
 
 | MetaValue | Rust 型 | `with_meta` に渡せる型 |
 |---|---|---|

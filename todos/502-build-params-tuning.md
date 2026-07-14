@@ -1,6 +1,6 @@
 # 502: extendCandidates のパラメータ化と構築コスト削減
 
-- Status: TODO
+- Status: DONE (2026-07-14)
 - Milestone: M5
 - Depends: 307 (計測ハーネス)
 - Design: docs/design/index.md §1, docs/benchmarks.md (課題)

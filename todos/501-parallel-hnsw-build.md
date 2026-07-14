@@ -1,6 +1,6 @@
 # 501: HNSW 構築の並列化
 
-- Status: TODO
+- Status: DONE (2026-07-14)
 - Milestone: M5
 - Depends: なし
 - Design: docs/design/index.md §1, docs/benchmarks.md (課題)

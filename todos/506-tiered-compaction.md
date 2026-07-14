@@ -1,6 +1,6 @@
 # 506: size-tiered 部分コンパクション
 
-- Status: TODO
+- Status: DONE (2026-07-14)
 - Milestone: M5
 - Depends: 504 (バックグラウンド化とセット)
 - Design: DESIGN.md §3, todos/README.md M4 実装メモ (full merge の暫定を解消)

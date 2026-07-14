@@ -14,8 +14,12 @@ let db = Database::open_with_options("./mydb", StoreOptions {
     hnsw: HnswParams::default(),
     hnsw_min_rows: 1024,
     compaction_threshold: 4,
+    sq8: false,
 })?;
 ```
+
+不正な値 (`dim == 0`、`ef == 0`、`compaction_threshold < 2` 等) は
+open 時に `InvalidConfig` エラーになります。
 
 | フィールド | 既定値 | 説明 |
 |---|---|---|
@@ -24,13 +28,19 @@ let db = Database::open_with_options("./mydb", StoreOptions {
 | `hnsw` | 下表 | フラッシュ時に構築する HNSW のパラメータ |
 | `hnsw_min_rows` | 1024 | この行数未満のセグメントは HNSW を作らない (Flat で検索) |
 | `compaction_threshold` | 4 | セグメント数がこの値以上で自動コンパクション |
+| `sq8` | false | SQ8 量子化 ([検索](search.md#sq8-量子化による高速化) 参照) |
 
 ## SyncPolicy
 
 | 値 | 挙動 | 耐久性 |
 |---|---|---|
-| `Always` | 書き込み (バッチ) ごとに fsync | Ok = 永続 (推奨・既定) |
+| `Always` | 書き込み (バッチ) ごとに fsync | Ok = 永続 (既定) |
+| `Batch` | 並行する書き込みの fsync を 1 回に相乗り (group commit) | Ok = 永続。並行書き込みで Always より高スループット |
 | `EveryN(n)` | n 回に 1 回 fsync | クラッシュで直近最大 n−1 件を失い得る |
+
+`Batch` は fsync 完了まで呼び出し元に Ok を返さないため耐久性は Always と
+同等です。複数スレッドから同時に書き込む場合に効果があります
+(単一スレッドでは Always と同じ)。
 
 ## HnswParams
 
@@ -40,7 +50,9 @@ let db = Database::open_with_options("./mydb", StoreOptions {
 | `m0` | 32 | 層 0 の最大接続数 (慣例的に 2m) |
 | `ef_construction` | 200 | 構築時の候補リスト幅。大きいと精度↑・構築時間↑ |
 | `ef_search` | 64 | 検索時の候補リスト幅の既定値。クエリごとに `.ef(n)` で上書き可 |
-| `seed` | 0 | レベル抽選の乱数 seed。実際の構築ではセグメント ID で上書きされる (決定的構築) |
+| `seed` | 0 | レベル抽選の乱数 seed。実際の構築ではセグメント ID で上書きされる |
+| `extend_candidates` | true | 構築時の候補拡張。クラスタ化したデータの再現率を保つ。自然データでは false で構築が約 20% 速くなる |
+| `build_threads` | 0 (自動 = 全コア) | 構築スレッド数。**2 以上ではグラフが非決定** (品質は保たれる)。1 で決定的構築 |
 
 パラメータと再現率・速度の実測は [ベンチマーク](benchmarks.md) を参照。
 

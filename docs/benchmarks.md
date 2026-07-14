@@ -1,5 +1,51 @@
 # ベンチマーク記録
 
+## M5 の改善結果 (2026-07-14)
+
+環境: Apple Silicon (aarch64) / macOS / rustc 1.93.0 / release ビルド。
+
+### HNSW 構築の並列化 (todo 501)
+
+SIFT1M (100 万 × 128 次元)、`cargo run --release -p hamane-bench -- --data data/sift`:
+
+| 構成 | 構築時間 | recall@10 (ef=64) |
+|---|---|---|
+| M4 (単一スレッド) | 1438.8 s | 0.977 |
+| 単一スレッド + HashSet 修正 | 1377.8 s | 0.972 |
+| **並列 (auto = 全コア)** | **297.7 s (4.8x)** | **0.972** |
+
+完了条件 (300 秒以内・recall 維持) を達成。`build_threads: 1` のときのみ構築は決定的。
+
+### extendCandidates の計測 (todo 502)
+
+SIFT 200k サブセット、ef=64:
+
+| 構成 | 構築 | recall@10 |
+|---|---|---|
+| extend ON (既定) | 50.9 s | 0.9897 |
+| extend OFF | 40.6 s (−20%) | 0.9881 |
+| extend OFF + ef_construction=300 | 44.7 s | 0.9891 |
+
+SIFT のような自然データでは OFF で構築 20% 高速・recall ほぼ同等。
+ただし強くクラスタ化したデータでは OFF だと recall が 0.84 まで落ちる
+(recall_at_10_clustered テスト) ため、**既定は ON を維持**。
+`HnswParams.extend_candidates = false` で opt-out できる。
+
+### バックグラウンドフラッシュ中の書き込みレイテンシ (todo 504)
+
+`cargo run --release -p hamane --example write_latency`
+(200k upsert、16MiB 閾値で自動フラッシュを誘発、fsync 除外):
+
+| 指標 | 値 |
+|---|---|
+| スループット | 141k upsert/s |
+| p50 / p99 / p99.9 | 2.6µs / **8µs** / 48µs |
+| max | 675ms (backpressure: active が閾値 4 倍到達時のみ) |
+
+完了条件 (フラッシュ中の upsert p99 < 10ms) を達成。M4 まではフラッシュ
+(HNSW 構築込み、分単位) の間すべての書き込みが停止していた。
+
+
 ## 距離カーネル (todos/402)
 
 - 日付: 2026-07-12

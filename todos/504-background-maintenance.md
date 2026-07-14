@@ -1,6 +1,6 @@
 # 504: バックグラウンドフラッシュ・コンパクション
 
-- Status: TODO
+- Status: DONE (2026-07-14)
 - Milestone: M5 (完了ゲート)
 - Depends: 501 (構築短縮後でも本質的に必要)
 - Design: docs/design/storage.md §6 (「バックグラウンド化は M4」とした残件)

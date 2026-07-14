@@ -1,6 +1,6 @@
 # 507: API 品質の小改善バックログ
 
-- Status: TODO
+- Status: DONE (2026-07-14)
 - Milestone: M5
 - Depends: なし
 - Design: 実装中に見つかった小課題の集約

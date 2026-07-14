@@ -1,6 +1,6 @@
 # 601: 文字列 ID 対応
 
-- Status: TODO
+- Status: DONE (2026-07-14)
 - Milestone: M6
 - Depends: なし (フォーマット変更を伴うため 506 の v2 bump と同時が望ましい)
 - Design: DESIGN.md §2 (「id は u64 or string」の string 側が未実装)

@@ -1,6 +1,7 @@
 # オンディスクフォーマット
 
-フォーマットバージョン: **v1**。本章は互換実装・デバッグのための仕様です。
+フォーマットバージョン: **v2** (manifest のみ v2。v1 は読み込み互換)。
+本章は互換実装・デバッグのための仕様です。
 より詳細な設計背景はリポジトリの `docs/design/storage.md` /
 `docs/design/index.md` を参照してください。
 
@@ -20,8 +21,9 @@
 | ids.bin | `HAMANEI\x01` |
 | meta.bin | `HAMANEM\x01` |
 | tombstones.bin | `HAMANET\x01` |
-| manifest | `HAMANEF\x01` |
+| manifest | `HAMANEF\x02` (v1 = `\x01` も読める) |
 | hnsw.bin | `HAMANEH\x01` |
+| vectors_sq8.bin | `HAMANEQ\x01` |
 
 ## WAL (`wal/<seq:020>.wal`)
 
@@ -107,6 +109,24 @@ footer crc32c
 
 node は行番号 (u32) と一致する。
 
+### vectors_sq8.bin (任意)
+
+SQ8 量子化ベクトル (`StoreOptions.sq8` 有効時のみ)。
+
+```text
+header (64B): magic, dim u32, count u64, min f32, max f32, pad
+data: count × dim × u8   (q = round((x − min) / s), s = (max−min)/255)
+footer crc32c
+```
+
+min/max は全次元共通 (グローバルスケール)。
+
+### 文字列 ID (`_ext_id` メタデータ)
+
+文字列 ID は専用ファイルを持たない。内部 u64 (2^63 以降を採番) との対応は
+各レコードの `_ext_id` メタデータとして meta.bin / WAL に載り、
+open 時に走査して辞書を再構築する。
+
 ## manifest (`MANIFEST-<gen:010>` と `CURRENT`)
 
 ```text
@@ -122,6 +142,10 @@ collection ごと:
   segment ごと: seg_id u64, record_count u64, tombstone_count u64
 footer crc32c
 ```
+
+セグメントリストは**年代順 (古い → 新しい)** (v2)。部分コンパクションの
+結果が古い位置に入るため、seg_id 順とは限らない。v1 (seg_id 昇順 = 年代順)
+はそのまま読める。
 
 `CURRENT` は有効な manifest ファイル名 1 行。更新は
 「新 manifest 書き込み + fsync → CURRENT.tmp + fsync → atomic rename →

@@ -1,6 +1,6 @@
 # 505: WAL group commit (SyncPolicy::Batch)
 
-- Status: TODO
+- Status: DONE (2026-07-14)
 - Milestone: M5
 - Depends: なし
 - Design: docs/design/storage.md §2 (SyncPolicy::Batch は設計済み未実装)

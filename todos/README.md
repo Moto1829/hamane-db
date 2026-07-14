@@ -8,7 +8,9 @@
 
 - ✅ M0: workspace + hamane-core (型・距離計算・フィルタ)
 - ✅ M1: インメモリ Flat 検索 + 公開 API (Database/Collection/SearchBuilder)
-- ✅ M2: 永続化 (WAL + セグメント + manifest)。2026-07-12 完了
+- ✅ M2: 永続化 (WAL + セグメント + manifest)
+- ✅ M3: HNSW / M4: 運用品質 (2026-07-12 完了)
+- ✅ M5: 性能とスケーラビリティ / M6: 機能拡張 (2026-07-14 完了)
 
 ## 横断
 
@@ -80,34 +82,50 @@ M4 完了条件: 長時間書き込みでディスク使用量が収束 (401 の
 - 402 は 307 (SIFT1M ベースライン) を待たず先行実施。結果は docs/benchmarks.md
   (dim768 で l2 1.7x / dot 2.2x。目標 2x は dot のみ達成、l2 はメモリ帯域律速)
 
-M0〜M4 の全タスク完了 (2026-07-12)。以降は次フェーズ。
-
-## M5: 性能とスケーラビリティ (2026-07-13 計画)
-
-実測で判明した課題への対処。**運用上の最優先は 504** (フラッシュ/コンパクション中に
-書き込みが分単位で停止する問題)、性能の最優先は 501 (構築 24 分)。
+## M5: 性能とスケーラビリティ
 
 | # | タスク | Depends |
 |---|---|---|
-| [501](501-parallel-hnsw-build.md) | HNSW 構築の並列化 (1M を 5 分以内に) | — |
-| [502](502-build-params-tuning.md) | extendCandidates のパラメータ化と構築コスト削減 | 307 |
-| [503](503-parallel-search.md) | 検索のソース並列化と live_len の O(1) 化 | — |
-| [504](504-background-maintenance.md) | バックグラウンドフラッシュ・コンパクション | 501 |
-| [505](505-group-commit.md) | WAL group commit (SyncPolicy::Batch) | — |
-| [506](506-tiered-compaction.md) | size-tiered 部分コンパクション | 504 |
-| [507](507-api-polish.md) | API 品質の小改善バックログ | — |
+| ✅ [501](501-parallel-hnsw-build.md) | HNSW 構築の並列化 (1M を 5 分以内に) | — |
+| ✅ [502](502-build-params-tuning.md) | extendCandidates のパラメータ化と構築コスト削減 | 307 |
+| ✅ [503](503-parallel-search.md) | 検索のソース並列化と live_len の O(1) 化 | — |
+| ✅ [504](504-background-maintenance.md) | バックグラウンドフラッシュ・コンパクション | 501 |
+| ✅ [505](505-group-commit.md) | WAL group commit (SyncPolicy::Batch) | — |
+| ✅ [506](506-tiered-compaction.md) | size-tiered 部分コンパクション | 504 |
+| ✅ [507](507-api-polish.md) | API 品質の小改善バックログ | — |
 
-M5 完了条件: SIFT1M 構築が 8 コアで 300 秒以内 (501)、かつ
-フラッシュ/コンパクション中の upsert p99 < 10ms (504)。
+M5 完了条件 — **達成済み** (docs/benchmarks.md に実測記録):
+- SIFT1M 構築 297.7 秒 (目標 300 秒以内、単一スレッド比 4.8x)
+- フラッシュ中の upsert p99 = 8µs (目標 < 10ms)
+
+実装メモ (計画からの意図的な差分):
+- 502: SIFT では off で構築 20% 高速・recall 同等だが、クラスタデータで
+  必須のため**既定は on を維持** (opt-out 可能)
+- 506: tier 分けは「×4 区切りの階層」でなく universal compaction 風
+  (最新側から同規模の連続 run をマージ)。明示 compact() は従来どおり full merge
+- 505: SyncPolicy::Batch は max_delay 不要の leader-follower 方式
+  (先着スレッドが fsync し後続が相乗り)
+- 507 の「config 不一致検出」は構造上発生しない (collection() は保存済み
+  config を返す) ため対象外
 
 ## M6: 機能拡張とエコシステム
 
 | # | タスク | Depends |
 |---|---|---|
-| [601](601-string-ids.md) | 文字列 ID 対応 | — |
-| [602](602-sq8-quantization.md) | スカラー量子化 (SQ8) + 再ランク | 307 |
-| [603](603-http-server.md) | hamane-server (HTTP API) | 504 |
-| [604](604-python-bindings.md) | Python バインディング (pyo3) | — |
+| ✅ [601](601-string-ids.md) | 文字列 ID 対応 | — |
+| ✅ [602](602-sq8-quantization.md) | スカラー量子化 (SQ8) + 再ランク | 307 |
+| ✅ [603](603-http-server.md) | hamane-server (HTTP API) | 504 |
+| ✅ [604](604-python-bindings.md) | Python バインディング (pyo3) | — |
 
-推奨着手順: 501 → 504 (M5 コア) を先に。502/503/505/507 は独立に並行可。
-M6 は用途次第 (Python から使うなら 601 → 604、サービス化なら 603)。
+実装メモ (計画からの意図的な差分):
+- 601: 専用の extid.bin でなく **_ext_id メタデータ方式** (フォーマット変更
+  ゼロ、open 時にセグメント走査 + WAL リプレイで辞書を再構築)
+- 602: 次元別 min/max でなく**全次元共通スケール** (距離計算が純粋な整数演算に
+  還元される)。u8 SIMD カーネルは未着手 (スカラーで自動ベクトル化任せ)
+- 604: maturin 未導入環境のため CI はコンパイルチェックのみ。pytest は
+  crates/hamane-py/tests/ (手順は同ファイル冒頭)
+
+## 残タスク
+
+なし — 全マイルストーン完了。今後の候補: SQ8 の u8 SIMD カーネル、
+検索スレッドプール化、hamane-py の wheel CI、レプリケーション。

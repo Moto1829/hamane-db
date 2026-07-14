@@ -1,6 +1,6 @@
 # 503: 検索のソース並列化と live_len の O(1) 化
 
-- Status: TODO
+- Status: DONE (2026-07-14)
 - Milestone: M5
 - Depends: なし
 - Design: docs/design/query.md §2 (「ソース並列化は M4」とした残件)

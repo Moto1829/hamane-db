@@ -1,7 +1,7 @@
 # ベンチマーク
 
-計測環境: Apple Silicon (aarch64) / macOS / rustc 1.93.0 / release ビルド /
-単一スレッド。再現手順はリポジトリの `docs/benchmarks.md` と
+計測環境: Apple Silicon (aarch64) / macOS / rustc 1.93.0 / release ビルド。
+検索は単一スレッド。再現手順はリポジトリの `docs/benchmarks.md` と
 `crates/hamane-bench` を参照。
 
 ## SIFT1M (100 万件, 128 次元, L2)
@@ -12,8 +12,10 @@ HNSW は既定パラメータ (m=16, ef_construction=200)。
 | 項目 | 値 |
 |---|---|
 | 挿入 (WAL + memtable) | 3.4 s (約 30 万 rec/s) |
-| フラッシュ + HNSW 構築 | 1438.8 s (単一スレッド) |
+| フラッシュ + HNSW 構築 (並列、全コア) | 297.7 s |
+| フラッシュ + HNSW 構築 (`build_threads: 1`) | 1377.8 s |
 | ディスクサイズ | 650 MB |
+| フラッシュ中の upsert p99 | 8 µs (バックグラウンド実行) |
 
 ### ef と再現率・速度のトレードオフ
 

@@ -1,6 +1,6 @@
 # 604: Python バインディング
 
-- Status: TODO
+- Status: DONE (2026-07-14)
 - Milestone: M6
 - Depends: なし (601 の文字列 ID があると使い勝手が大きく向上)
 - Design: —

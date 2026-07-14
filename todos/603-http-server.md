@@ -1,6 +1,6 @@
 # 603: hamane-server (HTTP API)
 
-- Status: TODO
+- Status: DONE (2026-07-14)
 - Milestone: M6
 - Depends: 504 (サーバ用途では書き込みストール解消が前提)
 - Design: DESIGN.md §7 (サーバ層は将来拡張として設計済み)

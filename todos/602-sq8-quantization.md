@@ -1,6 +1,6 @@
 # 602: スカラー量子化 (SQ8)
 
-- Status: TODO
+- Status: DONE (2026-07-14)
 - Milestone: M6
 - Depends: 307 (計測基盤)
 - Design: DESIGN.md §4 将来拡張, docs/design/index.md §1
