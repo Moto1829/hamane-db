@@ -96,6 +96,7 @@ fn open_db(path: &std::path::Path) -> Database {
 fn run_case(ops: &[Op]) {
     let dir = tempfile::tempdir().unwrap();
     let mut db = open_db(dir.path());
+    let _ = &db; // 束縛を明示 (Reopen で drop → open の順序を保つため下記参照)
     db.create_collection(
         "c",
         CollectionConfig {
@@ -126,6 +127,8 @@ fn run_case(ops: &[Op]) {
                 db.compact().unwrap();
             }
             Op::Reopen => {
+                // プロセスロック (todo 702) があるため、先に閉じてから開き直す
+                drop(db);
                 db = open_db(dir.path());
             }
         }

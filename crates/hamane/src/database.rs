@@ -89,4 +89,11 @@ impl Database {
     pub fn compact(&self) -> Result<()> {
         self.store.compact()
     }
+
+    /// 一貫性のあるバックアップを dest ディレクトリに取る。
+    /// 復元は dest を `Database::open` するだけ。dest は空であること。
+    /// コピー中の書き込みは待たされる (詳細は仕様書の「永続化」参照)。
+    pub fn backup(&self, dest: impl AsRef<Path>) -> Result<()> {
+        self.store.backup(dest.as_ref())
+    }
 }

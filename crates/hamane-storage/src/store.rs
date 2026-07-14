@@ -322,6 +322,8 @@ struct Shared {
     state: Mutex<StoreState>,
     /// pending_flush の消化完了 (またはエラー記録) で notify される
     flush_done: Condvar,
+    /// プロセス排他ロック (todo 702)。fd が開いている間 flock を保持する
+    _process_lock: Option<std::fs::File>,
 }
 
 /// データベース 1 個分の永続化装置。`Send + Sync`。
@@ -352,6 +354,42 @@ fn collections_dir(db_dir: &Path) -> PathBuf {
 
 fn collection_dir(db_dir: &Path, collection_id: u32) -> PathBuf {
     collections_dir(db_dir).join(collection_id.to_string())
+}
+
+/// `<db_dir>/LOCK` に排他 flock をかける (todo 702)。
+/// 別プロセス (または同一プロセスの別 Store) が保持していれば Locked を返す。
+/// flock はプロセス終了・クラッシュで自動解放されるため残骸の問題はない。
+/// 返された File が生きている間ロックが保持される。
+#[cfg(unix)]
+fn acquire_process_lock(db_dir: &Path) -> Result<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+    let path = db_dir.join("LOCK");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)?;
+    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if ret == 0 {
+        return Ok(file);
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+        Err(HamaneError::Locked(db_dir.display().to_string()))
+    } else {
+        Err(HamaneError::Io(err))
+    }
+}
+
+/// 非 unix はロックなし (ベストエフォート。多重 open の防止は保証されない)。
+#[cfg(not(unix))]
+fn acquire_process_lock(db_dir: &Path) -> Result<std::fs::File> {
+    let path = db_dir.join("LOCK");
+    Ok(std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)?)
 }
 
 /// manifest に載っていないセグメント/collection ディレクトリを削除する
@@ -410,6 +448,7 @@ impl Store {
                     maint_error: None,
                 }),
                 flush_done: Condvar::new(),
+                _process_lock: None,
             }),
             maint_tx: None,
             maint_join: Mutex::new(None),
@@ -420,6 +459,7 @@ impl Store {
     pub fn open(db_dir: &Path, options: StoreOptions) -> Result<Self> {
         options.validate()?;
         std::fs::create_dir_all(db_dir)?;
+        let process_lock = acquire_process_lock(db_dir)?;
         std::fs::create_dir_all(wal_dir(db_dir))?;
         std::fs::create_dir_all(collections_dir(db_dir))?;
 
@@ -502,6 +542,7 @@ impl Store {
             options,
             state: Mutex::new(state),
             flush_done: Condvar::new(),
+            _process_lock: Some(process_lock),
         });
         let (tx, rx) = mpsc::channel();
         let maint_shared = Arc::clone(&shared);
@@ -899,6 +940,59 @@ impl Store {
             }
             state = self.shared.flush_done.wait(state).expect("lock poisoned");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // バックアップ (todo 703)
+    // -----------------------------------------------------------------------
+
+    /// 一貫性のあるバックアップを dest ディレクトリに取る。
+    /// 復元は dest を通常どおり `Store::open` するだけ。
+    ///
+    /// 手順: 先に flush で未フラッシュ分をセグメント化した後、state ロックを
+    /// 保持したまま manifest と全セグメントをコピーする。**コピー中の書き込みは
+    /// 待たされる** (コピーは純粋な I/O で、HNSW 構築よりはるかに短い)。
+    /// flush とロック取得のわずかな間に入った書き込みはバックアップに含まれない
+    /// (バックアップは常に manifest 世代として一貫)。
+    pub fn backup(&self, dest: &Path) -> Result<()> {
+        let Some(db_dir) = self.shared.db_dir.clone() else {
+            return Err(HamaneError::InvalidConfig(
+                "cannot backup an in-memory database".into(),
+            ));
+        };
+        if dest.exists() && std::fs::read_dir(dest)?.next().is_some() {
+            return Err(HamaneError::InvalidConfig(format!(
+                "backup destination is not empty: {}",
+                dest.display()
+            )));
+        }
+        // 未フラッシュ分をセグメント化 (完了まで待つ)
+        self.flush()?;
+        std::fs::create_dir_all(dest)?;
+        std::fs::create_dir_all(dest.join("wal"))?;
+        std::fs::create_dir_all(collections_dir(dest))?;
+
+        // ロック保持中はセグメント集合が変わらない (書き込み・コンパクション停止)
+        let state = self.shared.state.lock().expect("lock poisoned");
+        let manifest_name = crate::manifest::manifest_file_name(state.manifest.gen);
+        std::fs::copy(db_dir.join(&manifest_name), dest.join(&manifest_name))?;
+        for col in &state.manifest.collections {
+            let src_col = collection_dir(&db_dir, col.collection_id);
+            let dst_col = collection_dir(dest, col.collection_id);
+            for seg in &col.segments {
+                let name = segment_dir_name(seg.seg_id);
+                let src_seg = src_col.join(&name);
+                let dst_seg = dst_col.join(&name);
+                std::fs::create_dir_all(&dst_seg)?;
+                for entry in std::fs::read_dir(&src_seg)? {
+                    let entry = entry?;
+                    std::fs::copy(entry.path(), dst_seg.join(entry.file_name()))?;
+                }
+            }
+        }
+        // CURRENT は最後に書く (dest が常に完全な世代を指すように)
+        std::fs::write(dest.join(CURRENT_FILE), format!("{manifest_name}\n"))?;
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1317,6 +1411,17 @@ mod tests {
         Store::open(dir, StoreOptions::default()).unwrap()
     }
 
+    /// クラッシュ相当のシャットダウン: Drop の Shutdown フラッシュを走らせずに
+    /// 終了する (メンテスレッドはチャネル閉鎖で静かに抜ける)。
+    /// プロセスロック (todo 702) は解放されるため、同一プロセス内で再 open できる。
+    fn simulate_crash(mut store: Store) {
+        store.maint_tx.take();
+        if let Some(join) = store.maint_join.lock().unwrap().take() {
+            let _ = join.join();
+        }
+        drop(store);
+    }
+
     #[test]
     fn create_upsert_reopen_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
@@ -1663,12 +1768,9 @@ mod tests {
             // WAL が 2 本ある状態を確認
             let wals = crate::wal::list_wal_files(&dir.path().join("wal")).unwrap();
             assert_eq!(wals.len(), 2);
-            // Drop 時の Shutdown はフラッシュを走らせるので、ここでは
-            // メンテスレッドを先に殺す: tx を閉じて join
+            simulate_crash(store);
             cid
         };
-        // ↑ Drop はフラッシュしてしまうため、このテストではフラッシュ後も
-        //   同じ結果になることの検証となる (WAL 復旧経路は下の再構築で検証)
 
         // WAL 2 本の状態をファイル操作で再構築して復旧経路を直接検証
         let dir2 = tempfile::tempdir().unwrap();
@@ -1676,7 +1778,7 @@ mod tests {
             let store = open(dir2.path());
             let info = store.create_collection("docs", 1, Metric::L2).unwrap();
             store.upsert(info.collection_id, 1, rec(vec![1.0])).unwrap();
-            std::mem::forget(store); // Shutdown フラッシュを走らせない
+            simulate_crash(store);
             info.collection_id
         };
         // seq=2 の WAL を手で作り、上書きを追記する
@@ -1741,8 +1843,7 @@ mod tests {
                     });
                 }
             });
-            // Drop せずリーク = クラッシュ相当 (Shutdown フラッシュを走らせない)
-            std::mem::forget(store);
+            simulate_crash(store); // クラッシュ相当 (Shutdown フラッシュを走らせない)
             cid
         };
         // ack 済みの 200 件すべてが WAL から復元される
@@ -1874,6 +1975,65 @@ mod tests {
                 "must reject: {options:?}"
             );
         }
+    }
+
+    /// プロセス排他ロック (todo 702): 二重 open は Locked、解放後は再 open 可能。
+    #[cfg(unix)]
+    #[test]
+    fn double_open_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        let second = Store::open(dir.path(), StoreOptions::default());
+        assert!(
+            matches!(second, Err(HamaneError::Locked(_))),
+            "second open must fail with Locked"
+        );
+        drop(store);
+        // 解放後は開ける
+        let reopened = Store::open(dir.path(), StoreOptions::default());
+        assert!(reopened.is_ok());
+    }
+
+    /// バックアップ (todo 703): バックアップ時点のスナップショットが取れ、
+    /// その後の書き込みは含まれない。バックアップは通常の open で復元できる。
+    #[test]
+    fn backup_is_consistent_snapshot() {
+        let src = tempfile::tempdir().unwrap();
+        let dest_root = tempfile::tempdir().unwrap();
+        let dest = dest_root.path().join("backup");
+
+        let store = open(src.path());
+        let info = store.create_collection("docs", 1, Metric::L2).unwrap();
+        let cid = info.collection_id;
+        for i in 0..10u64 {
+            store.upsert(cid, i, rec(vec![i as f32])).unwrap();
+        }
+        store.flush().unwrap();
+        store.upsert(cid, 100, rec(vec![100.0])).unwrap(); // 未フラッシュ分
+
+        store.backup(&dest).unwrap();
+
+        // バックアップ後の書き込みはバックアップに含まれない
+        store.upsert(cid, 200, rec(vec![200.0])).unwrap();
+        drop(store);
+
+        let restored = open(&dest);
+        let view = restored.view(cid).unwrap();
+        assert_eq!(
+            view.live_len(),
+            11,
+            "flushed 10 + unflushed 1 at backup time"
+        );
+        assert_eq!(view.get(100).unwrap().vector, vec![100.0]);
+        assert!(view.get(200).is_none(), "post-backup write must be absent");
+        // CRC 込みで全セグメントが健全
+        for seg in &view.segments {
+            seg.verify_checksums().unwrap();
+        }
+
+        // 空でない dest はエラー
+        let store = open(src.path());
+        assert!(store.backup(&dest).is_err());
     }
 
     #[test]

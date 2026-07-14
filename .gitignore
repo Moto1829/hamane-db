@@ -23,3 +23,6 @@ target
 # Benchmark datasets (scripts/download_sift1m.sh)
 /data/
 /docs/spec/book/
+
+# Python venv (hamane-py)
+.venv/

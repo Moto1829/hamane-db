@@ -73,7 +73,9 @@ impl From<HamaneError> for ApiError {
             | HamaneError::InvalidConfig(_) => StatusCode::BAD_REQUEST,
             HamaneError::CollectionNotFound(_) => StatusCode::NOT_FOUND,
             HamaneError::CollectionExists(_) => StatusCode::CONFLICT,
-            HamaneError::Corrupted(_) | HamaneError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            HamaneError::Corrupted(_) | HamaneError::Io(_) | HamaneError::Locked(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         };
         ApiError(status, e.to_string())
     }

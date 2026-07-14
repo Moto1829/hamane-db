@@ -125,7 +125,24 @@ M5 完了条件 — **達成済み** (docs/benchmarks.md に実測記録):
 - 604: maturin 未導入環境のため CI はコンパイルチェックのみ。pytest は
   crates/hamane-py/tests/ (手順は同ファイル冒頭)
 
-## 残タスク
+## M7: 運用ハードニング (2026-07-15 計画)
 
-なし — 全マイルストーン完了。今後の候補: SQ8 の u8 SIMD カーネル、
-検索スレッドプール化、hamane-py の wheel CI、レプリケーション。
+| # | タスク | Depends |
+|---|---|---|
+| ✅ [701](701-sq8-simd.md) | SQ8 の u8 SIMD カーネル | 602 |
+| ✅ [702](702-process-lock.md) | プロセス排他ロック | — |
+| ✅ [703](703-backup.md) | バックアップ API | 702 |
+| ✅ [704](704-python-ci.md) | Python バインディングの CI (pytest + wheel) | 604 |
+
+M7 完了 (2026-07-15)。実装メモ:
+- 701: NEON のみ実装 (dim768 で f32 比 L2 4.2x / dot 3.8x、スカラーと完全一致)。
+  AVX2 は検証環境がなく見送り (x86_64 はスカラー = 自動ベクトル化任せ)
+- 702: flock (advisory)。クラッシュ時は OS が自動解放するため残骸なし。
+  非 unix はベストエフォート
+- 703: flush + state ロック保持でのコピー (コピー中は書き込み停止)。
+  WAL は含まず manifest 世代として一貫
+- 704: pytest 4 本をローカル (venv + maturin develop) と CI (ubuntu、
+  wheel ビルド + pip install + pytest) の両方で実行
+
+将来候補 (未タスク化): 検索スレッドプール化、レプリケーション (WAL シッピング)、
+crates.io / PyPI 公開。

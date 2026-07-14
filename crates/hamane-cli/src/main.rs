@@ -77,6 +77,8 @@ enum Command {
     Flush { db: PathBuf },
     /// セグメントを統合して上書き・削除を物理適用する
     Compact { db: PathBuf },
+    /// 一貫性のあるバックアップを取る (dest は空ディレクトリ)
+    Backup { db: PathBuf, dest: PathBuf },
 }
 
 fn main() -> ExitCode {
@@ -203,6 +205,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             db.flush()?;
             db.compact()?;
             println!("{}", json!({"compacted": true}));
+        }
+        Command::Backup { db, dest } => {
+            let db = Database::open(&db)?;
+            db.backup(&dest)?;
+            println!("{}", json!({"backup": dest}));
         }
     }
     Ok(())

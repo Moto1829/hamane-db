@@ -10,6 +10,7 @@
 | `CollectionNotFound(name)` | 存在しない Collection への操作 | 名前を確認 |
 | `InvalidConfig(msg)` | `dim == 0` など設定不正 | 設定を修正 |
 | `Corrupted(msg)` | ファイル破損の検出 (CRC 不一致・フォーマット不正) | 下記 |
+| `Locked(path)` | 同じ DB を別プロセス (または二重に) 開こうとした | 先に開いた側を閉じる |
 | `Io(std::io::Error)` | ファイル I/O 失敗 (権限・ディスクフル等) | 環境を確認 |
 
 ## エラー後の状態

@@ -55,6 +55,7 @@ hamane info <DB_DIR>
 ```sh
 hamane flush <DB_DIR>     # memtable をセグメント化
 hamane compact <DB_DIR>   # flush + セグメント統合 (ディスク回収)
+hamane backup <DB_DIR> <DEST_DIR>   # 一貫性のあるバックアップ (DEST は空)
 ```
 
 ## フィルタの JSON 表現

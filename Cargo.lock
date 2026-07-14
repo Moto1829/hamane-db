@@ -486,6 +486,7 @@ dependencies = [
  "crc32c",
  "hamane-core",
  "hamane-index",
+ "libc",
  "memmap2",
  "tempfile",
 ]

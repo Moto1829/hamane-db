@@ -58,9 +58,42 @@ impl Sq8Params {
 }
 
 /// `Σ (a−b)²` (u8 コード間の整数 L2²)。
+///
+/// aarch64 は NEON、x86_64 は AVX2 (実行時判定)、他はスカラー。
+/// 中間アキュムレータは u32 のため **dim ≤ 66051** が前提
+/// (dim × 255² が u32 に収まる範囲。実用上の全ケースをカバー)。
 #[inline]
 pub fn sq8_l2_accum(a: &[u8], b: &[u8]) -> u64 {
     debug_assert_eq!(a.len(), b.len());
+    debug_assert!(a.len() <= 66051, "dim too large for u32 accumulator");
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Safety: NEON は aarch64 で常に利用可能
+        return unsafe { neon::l2_accum(a, b) };
+    }
+    #[allow(unreachable_code)]
+    sq8_l2_accum_scalar(a, b)
+}
+
+/// `(Σ a·b, Σ b)` (u8 コード間の整数 dot と、b 側の総和)。
+/// a 側 (クエリ) の総和は呼び出し側が 1 回だけ計算して使い回す。
+/// dim の上限は `sq8_l2_accum` と同じ。
+#[inline]
+pub fn sq8_dot_accum(a: &[u8], b: &[u8]) -> (u64, u64) {
+    debug_assert_eq!(a.len(), b.len());
+    debug_assert!(a.len() <= 66051, "dim too large for u32 accumulator");
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Safety: NEON は aarch64 で常に利用可能
+        return unsafe { neon::dot_accum(a, b) };
+    }
+    #[allow(unreachable_code)]
+    sq8_dot_accum_scalar(a, b)
+}
+
+/// スカラー実装 (全プラットフォームの正解基準)。
+#[inline]
+pub fn sq8_l2_accum_scalar(a: &[u8], b: &[u8]) -> u64 {
     let mut sum = 0u64;
     for (&x, &y) in a.iter().zip(b) {
         let d = x as i32 - y as i32;
@@ -69,11 +102,9 @@ pub fn sq8_l2_accum(a: &[u8], b: &[u8]) -> u64 {
     sum
 }
 
-/// `(Σ a·b, Σ b)` (u8 コード間の整数 dot と、b 側の総和)。
-/// a 側 (クエリ) の総和は呼び出し側が 1 回だけ計算して使い回す。
+/// スカラー実装の dot + Σb。
 #[inline]
-pub fn sq8_dot_accum(a: &[u8], b: &[u8]) -> (u64, u64) {
-    debug_assert_eq!(a.len(), b.len());
+pub fn sq8_dot_accum_scalar(a: &[u8], b: &[u8]) -> (u64, u64) {
     let mut dot = 0u64;
     let mut sum_b = 0u64;
     for (&x, &y) in a.iter().zip(b) {
@@ -81,6 +112,74 @@ pub fn sq8_dot_accum(a: &[u8], b: &[u8]) -> (u64, u64) {
         sum_b += y as u64;
     }
     (dot, sum_b)
+}
+
+/// NEON 実装 (aarch64、todo 701)。16 lane の u8 を widening 乗算で
+/// u16 → u32 に累積する。整数演算なのでスカラーと**完全一致**する。
+#[cfg(target_arch = "aarch64")]
+mod neon {
+    use std::arch::aarch64::*;
+
+    #[inline]
+    #[target_feature(enable = "neon")]
+    pub unsafe fn l2_accum(a: &[u8], b: &[u8]) -> u64 {
+        // 32 バイト/イテレーションでアキュムレータ 4 本 (依存チェーンを切る)
+        let mut acc0 = vdupq_n_u32(0);
+        let mut acc1 = vdupq_n_u32(0);
+        let mut acc2 = vdupq_n_u32(0);
+        let mut acc3 = vdupq_n_u32(0);
+        let chunks = a.len() / 32;
+        for i in 0..chunks {
+            let pa = a.as_ptr().add(i * 32);
+            let pb = b.as_ptr().add(i * 32);
+            let d0 = vabdq_u8(vld1q_u8(pa), vld1q_u8(pb));
+            let d1 = vabdq_u8(vld1q_u8(pa.add(16)), vld1q_u8(pb.add(16)));
+            acc0 = vpadalq_u16(acc0, vmull_u8(vget_low_u8(d0), vget_low_u8(d0)));
+            acc1 = vpadalq_u16(acc1, vmull_u8(vget_high_u8(d0), vget_high_u8(d0)));
+            acc2 = vpadalq_u16(acc2, vmull_u8(vget_low_u8(d1), vget_low_u8(d1)));
+            acc3 = vpadalq_u16(acc3, vmull_u8(vget_high_u8(d1), vget_high_u8(d1)));
+        }
+        let acc = vaddq_u32(vaddq_u32(acc0, acc1), vaddq_u32(acc2, acc3));
+        let mut sum = vaddvq_u32(acc) as u64;
+        for i in chunks * 32..a.len() {
+            let d = a[i] as i32 - b[i] as i32;
+            sum += (d * d) as u64;
+        }
+        sum
+    }
+
+    #[inline]
+    #[target_feature(enable = "neon")]
+    pub unsafe fn dot_accum(a: &[u8], b: &[u8]) -> (u64, u64) {
+        let mut dot0 = vdupq_n_u32(0);
+        let mut dot1 = vdupq_n_u32(0);
+        let mut dot2 = vdupq_n_u32(0);
+        let mut dot3 = vdupq_n_u32(0);
+        let mut sum0 = vdupq_n_u32(0);
+        let mut sum1 = vdupq_n_u32(0);
+        let chunks = a.len() / 32;
+        for i in 0..chunks {
+            let pa = a.as_ptr().add(i * 32);
+            let pb = b.as_ptr().add(i * 32);
+            let (va0, vb0) = (vld1q_u8(pa), vld1q_u8(pb));
+            let (va1, vb1) = (vld1q_u8(pa.add(16)), vld1q_u8(pb.add(16)));
+            dot0 = vpadalq_u16(dot0, vmull_u8(vget_low_u8(va0), vget_low_u8(vb0)));
+            dot1 = vpadalq_u16(dot1, vmull_u8(vget_high_u8(va0), vget_high_u8(vb0)));
+            dot2 = vpadalq_u16(dot2, vmull_u8(vget_low_u8(va1), vget_low_u8(vb1)));
+            dot3 = vpadalq_u16(dot3, vmull_u8(vget_high_u8(va1), vget_high_u8(vb1)));
+            // Σb: u8 → u16 → u32 のペア加算
+            sum0 = vpadalq_u16(sum0, vpaddlq_u8(vb0));
+            sum1 = vpadalq_u16(sum1, vpaddlq_u8(vb1));
+        }
+        let dot_acc = vaddq_u32(vaddq_u32(dot0, dot1), vaddq_u32(dot2, dot3));
+        let mut dot = vaddvq_u32(dot_acc) as u64;
+        let mut sum_b = vaddvq_u32(vaddq_u32(sum0, sum1)) as u64;
+        for i in chunks * 32..a.len() {
+            dot += (a[i] as u32 * b[i] as u32) as u64;
+            sum_b += b[i] as u64;
+        }
+        (dot, sum_b)
+    }
 }
 
 #[cfg(test)]
@@ -153,6 +252,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// SIMD とスカラーの完全一致 (整数演算なので誤差ゼロ、todo 701)。
+    #[test]
+    fn simd_matches_scalar_exactly() {
+        let mut state = 0xABCDu64;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (state >> 33) as u8
+        };
+        // 端数 (len % 16 != 0) を含む長さで検証
+        for len in [1usize, 15, 16, 17, 64, 127, 128, 768, 1537] {
+            let a: Vec<u8> = (0..len).map(|_| next()).collect();
+            let b: Vec<u8> = (0..len).map(|_| next()).collect();
+            assert_eq!(
+                sq8_l2_accum(&a, &b),
+                sq8_l2_accum_scalar(&a, &b),
+                "l2 len={len}"
+            );
+            assert_eq!(
+                sq8_dot_accum(&a, &b),
+                sq8_dot_accum_scalar(&a, &b),
+                "dot len={len}"
+            );
+        }
+        // 最大値 (255) でのオーバーフロー確認
+        let a = vec![255u8; 768];
+        let b = vec![0u8; 768];
+        assert_eq!(sq8_l2_accum(&a, &b), 768 * 255 * 255);
+        let (dot, sum) = sq8_dot_accum(&a, &a);
+        assert_eq!(dot, 768 * 255 * 255);
+        assert_eq!(sum, 768 * 255);
     }
 
     #[test]
