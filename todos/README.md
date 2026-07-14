@@ -133,6 +133,7 @@ M5 完了条件 — **達成済み** (docs/benchmarks.md に実測記録):
 | ✅ [702](702-process-lock.md) | プロセス排他ロック | — |
 | ✅ [703](703-backup.md) | バックアップ API | 702 |
 | ✅ [704](704-python-ci.md) | Python バインディングの CI (pytest + wheel) | 604 |
+| ✅ [705](705-server-auth.md) | hamane-server の API キー認証 | 603 |
 
 M7 完了 (2026-07-15)。実装メモ:
 - 701: NEON のみ実装 (dim768 で f32 比 L2 4.2x / dot 3.8x、スカラーと完全一致)。
@@ -143,6 +144,8 @@ M7 完了 (2026-07-15)。実装メモ:
   WAL は含まず manifest 世代として一貫
 - 704: pytest 4 本をローカル (venv + maturin develop) と CI (ubuntu、
   wheel ビルド + pip install + pytest) の両方で実行
+- 705: 静的 API キー (Bearer / X-Api-Key、定数時間比較)。キー未指定は
+  認証なし + 起動時警告。TLS は引き続きリバースプロキシ前提
 
 将来候補 (未タスク化): 検索スレッドプール化、レプリケーション (WAL シッピング)、
 crates.io / PyPI 公開。

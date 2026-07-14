@@ -52,10 +52,11 @@ hamane flush ./db && hamane compact ./db
 ## HTTP サーバ
 
 ```sh
-cargo run --release -p hamane-server -- --db ./db --listen 127.0.0.1:8080
+cargo run --release -p hamane-server -- --db ./db --listen 127.0.0.1:8080 \
+    --api-key my-secret   # 省略時は認証なし (HAMANE_API_KEY でも指定可)
 
 curl -X PUT localhost:8080/collections/docs -H 'content-type: application/json' \
-     -d '{"dim": 4, "metric": "cosine"}'
+     -H 'authorization: Bearer my-secret' -d '{"dim": 4, "metric": "cosine"}'
 curl -X POST localhost:8080/collections/docs/records -H 'content-type: application/json' \
      -d '{"id": "doc-1", "vector": [0.1, 0.2, 0.3, 0.4], "meta": {"lang": "ja"}}'
 curl -X POST localhost:8080/collections/docs/search -H 'content-type: application/json' \

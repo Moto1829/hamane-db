@@ -40,7 +40,8 @@ v0.3 (M7 完了) 時点の制約です。
 - `StoreOptions` は永続化されず、open のたびに指定が必要。
   異なる `hnsw` / `sq8` 設定で開いても既存セグメントは再構築されない
   (次のフラッシュ / コンパクションから適用)
-- HTTP サーバ (hamane-server) に認証・TLS はない (リバースプロキシ前提)
+- HTTP サーバ (hamane-server) の TLS はリバースプロキシ前提
+  (認証は静的 API キーを提供: `--api-key` / `HAMANE_API_KEY`)
 - `Database::backup(dest)` のコピー中は書き込みが待たされる
   (コピーは純粋な I/O で短時間)
 - 内部ロックが poisoned になった場合 (書き込み中の panic 後) は

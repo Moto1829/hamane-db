@@ -134,6 +134,53 @@ async fn collection_lifecycle_and_crud() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// API キー認証 (todo 705)。
+#[tokio::test]
+async fn api_key_authentication() {
+    let app =
+        hamane_server::router_with_auth(Arc::new(Database::in_memory()), Some("secret-key".into()));
+
+    // キーなし → 401
+    let (status, body) = request(&app, "GET", "/collections", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "unauthorized");
+
+    // 間違ったキー → 401
+    let req = Request::builder()
+        .method("GET")
+        .uri("/collections")
+        .header("authorization", "Bearer wrong-key")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // Bearer で正しいキー → 200
+    let req = Request::builder()
+        .method("GET")
+        .uri("/collections")
+        .header("authorization", "Bearer secret-key")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // X-Api-Key でも 200
+    let req = Request::builder()
+        .method("GET")
+        .uri("/collections")
+        .header("x-api-key", "secret-key")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // キー未設定のルーターは素通し (既存テスト全体がこの経路)
+    let open_app = test_app();
+    let (status, _) = request(&open_app, "GET", "/collections", None).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
 #[tokio::test]
 async fn error_status_codes() {
     let app = test_app();

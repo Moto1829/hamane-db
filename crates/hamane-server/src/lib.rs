@@ -13,13 +13,16 @@
 //! | POST | /admin/flush | フラッシュ |
 //! | POST | /admin/compact | コンパクション |
 //!
-//! 認証・TLS はスコープ外 (リバースプロキシ前提)。
+//! 認証は静的 API キー (todo 705): `router_with_auth(db, Some(key))` で
+//! 全エンドポイントが `Authorization: Bearer <key>` または
+//! `X-Api-Key: <key>` を要求する。TLS はスコープ外 (リバースプロキシ前提)。
 //! レコード・フィルタの JSON 表現は CLI (hamane-cli) と同一。
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Request, State};
 use axum::http::StatusCode;
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -35,9 +38,15 @@ pub struct AppState {
     db: Arc<Database>,
 }
 
-/// ルーターを構築する (テストからも使う)。
+/// ルーターを構築する (認証なし。ローカル開発・テスト向け)。
 pub fn router(db: Arc<Database>) -> Router {
-    Router::new()
+    router_with_auth(db, None)
+}
+
+/// ルーターを構築する。`api_key` が Some なら全エンドポイントで
+/// `Authorization: Bearer <key>` または `X-Api-Key: <key>` を要求する。
+pub fn router_with_auth(db: Arc<Database>, api_key: Option<String>) -> Router {
+    let router = Router::new()
         .route("/collections", get(list_collections))
         .route(
             "/collections/{name}",
@@ -53,7 +62,39 @@ pub fn router(db: Arc<Database>) -> Router {
         .route("/collections/{name}/search", post(search))
         .route("/admin/flush", post(flush))
         .route("/admin/compact", post(compact))
-        .with_state(AppState { db })
+        .with_state(AppState { db });
+    match api_key {
+        Some(key) => {
+            let key = Arc::new(key);
+            router.layer(middleware::from_fn(move |req, next| {
+                let key = Arc::clone(&key);
+                async move { require_api_key(key, req, next).await }
+            }))
+        }
+        None => router,
+    }
+}
+
+/// 定数時間の等価比較 (タイミング攻撃対策)。
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// API キー検証ミドルウェア (todo 705)。
+async fn require_api_key(key: Arc<String>, req: Request, next: Next) -> Response {
+    let presented = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .or_else(|| req.headers().get("x-api-key").and_then(|v| v.to_str().ok()));
+    match presented {
+        Some(p) if constant_time_eq(p.as_bytes(), key.as_bytes()) => next.run(req).await,
+        _ => ApiError(StatusCode::UNAUTHORIZED, "unauthorized".into()).into_response(),
+    }
 }
 
 /// エラー → HTTP ステータスの対応。
