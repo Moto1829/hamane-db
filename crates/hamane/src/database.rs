@@ -5,6 +5,7 @@ use hamane_core::{HamaneError, Result};
 use hamane_storage::{Store, StoreOptions};
 
 use crate::collection::{Collection, CollectionConfig};
+use crate::pool::SearchPool;
 
 /// データベース本体。Collection の入れ物。
 ///
@@ -12,6 +13,8 @@ use crate::collection::{Collection, CollectionConfig};
 /// どちらも同じ API で使える (docs/design/query.md §3)。
 pub struct Database {
     store: Arc<Store>,
+    /// セグメント並列検索用の共有プール (todo 801)。全 Collection で共有
+    search_pool: Arc<SearchPool>,
 }
 
 impl Database {
@@ -19,6 +22,7 @@ impl Database {
     pub fn in_memory() -> Self {
         Self {
             store: Arc::new(Store::in_memory()),
+            search_pool: Arc::new(SearchPool::new(0)),
         }
     }
 
@@ -30,8 +34,10 @@ impl Database {
 
     /// フラッシュ閾値や fsync ポリシーを指定して開く。
     pub fn open_with_options(path: impl AsRef<Path>, options: StoreOptions) -> Result<Self> {
+        let search_pool = Arc::new(SearchPool::new(options.search_threads));
         Ok(Self {
             store: Arc::new(Store::open(path.as_ref(), options)?),
+            search_pool,
         })
     }
 
@@ -52,6 +58,7 @@ impl Database {
             config,
             info.collection_id,
             Arc::clone(&self.store),
+            Arc::clone(&self.search_pool),
         )))
     }
 
@@ -66,6 +73,7 @@ impl Database {
             },
             info.collection_id,
             Arc::clone(&self.store),
+            Arc::clone(&self.search_pool),
         )))
     }
 

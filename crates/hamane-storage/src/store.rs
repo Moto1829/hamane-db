@@ -40,6 +40,10 @@ pub struct StoreOptions {
     /// SQ8 量子化 (todo 602)。有効にすると HNSW 探索の距離計算が u8 になり
     /// メモリ帯域を節約する。結果は f32 で再ランクされ recall を保つ
     pub sq8: bool,
+    /// セグメント並列検索の並列度 (todo 801)。0 = 自動 (論理コア数)、
+    /// 1 = 逐次。プールは Database 全体で共有され、初回の複数セグメント
+    /// 検索まで worker スレッドは起動しない
+    pub search_threads: usize,
 }
 
 impl Default for StoreOptions {
@@ -51,6 +55,7 @@ impl Default for StoreOptions {
             hnsw_min_rows: 1024,
             compaction_threshold: 4,
             sq8: false,
+            search_threads: 0,
         }
     }
 }

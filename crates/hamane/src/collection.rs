@@ -1,9 +1,12 @@
 use std::cell::RefCell;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use hamane_core::{normalize, Filter, HamaneError, Id, Metadata, Metric, Record, RecordId, Result};
 use hamane_index::{search_flat, search_hnsw};
 use hamane_storage::{LiveView, Segment, Store, StoredRecord};
+
+use crate::pool::SearchPool;
 
 /// フィルタ選択率の推定サンプル数と pre/post filter の切り替え閾値
 /// (docs/design/index.md §5)。
@@ -62,6 +65,8 @@ pub struct Collection {
     config: CollectionConfig,
     collection_id: u32,
     store: Arc<Store>,
+    /// セグメント並列検索用プール (Database 全体で共有、todo 801)
+    search_pool: Arc<SearchPool>,
 }
 
 impl std::fmt::Debug for Collection {
@@ -80,12 +85,14 @@ impl Collection {
         config: CollectionConfig,
         collection_id: u32,
         store: Arc<Store>,
+        search_pool: Arc<SearchPool>,
     ) -> Self {
         Self {
             name,
             config,
             collection_id,
             store,
+            search_pool,
         }
     }
 
@@ -234,38 +241,42 @@ impl Collection {
             }
         }
 
-        // セグメント間は並列に検索する (todo 503)。1 個以下ならスレッドを立てない
-        let rank_base = view.memtables().len();
-        if view.segments.len() <= 1 {
-            for (i, seg) in view.segments.iter().enumerate() {
-                candidates.extend(self.search_segment(
-                    &view,
-                    rank_base + i,
-                    seg,
-                    &query,
-                    k,
-                    ef,
-                    filter,
-                )?);
+        // セグメント検索の共有コンテキスト。プールのジョブは 'static が必要な
+        // ため owned に集約し Arc で配る (todo 801)
+        let search = Arc::new(SegmentSearch {
+            view,
+            query,
+            k,
+            ef,
+            metric,
+            filter: filter.cloned(),
+        });
+        let n = search.view.segments.len();
+
+        // セグメント間は共有プールで並列に検索する (todo 503 / 801)。
+        // 1 個以下、または並列度 1 なら呼び出しスレッドで逐次
+        if n <= 1 || self.search_pool.threads() <= 1 {
+            for i in 0..n {
+                candidates.extend(search.segment(i)?);
             }
         } else {
-            let per_segment: Vec<Result<Vec<(f32, Id)>>> = std::thread::scope(|scope| {
-                let (view, query) = (&view, query.as_slice());
-                let handles: Vec<_> = view
-                    .segments
-                    .iter()
-                    .enumerate()
-                    .map(|(i, seg)| {
-                        scope.spawn(move || {
-                            self.search_segment(view, rank_base + i, seg, query, k, ef, filter)
-                        })
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|h| h.join().expect("segment search thread panicked"))
-                    .collect()
-            });
+            let (tx, rx) = std::sync::mpsc::channel();
+            for i in 1..n {
+                let (search, tx) = (Arc::clone(&search), tx.clone());
+                self.search_pool.execute(Box::new(move || {
+                    // panic は payload ごと呼び出し元へ運び、そちらで再伝播する
+                    let result = catch_unwind(AssertUnwindSafe(|| search.segment(i)));
+                    let _ = tx.send(result);
+                }));
+            }
+            // 呼び出しスレッドも 1 セグメント担当する (実効並列度 = threads)
+            let mut per_segment = vec![search.segment(0)];
+            for _ in 1..n {
+                match rx.recv().expect("search job dropped without sending") {
+                    Ok(result) => per_segment.push(result),
+                    Err(payload) => std::panic::resume_unwind(payload),
+                }
+            }
             for result in per_segment {
                 candidates.extend(result?);
             }
@@ -280,24 +291,32 @@ impl Collection {
             .map(|(key, id)| SearchHit {
                 id,
                 score: metric.score_from_key(key),
-                metadata: view.get(id).map(|r| r.metadata).unwrap_or_default(),
+                metadata: search.view.get(id).map(|r| r.metadata).unwrap_or_default(),
             })
             .collect())
     }
+}
 
-    /// セグメント 1 個の検索プラン (docs/design/index.md §4–5)。
-    #[allow(clippy::too_many_arguments)]
-    fn search_segment(
-        &self,
-        view: &LiveView,
-        rank: usize,
-        seg: &Segment,
-        query: &[f32],
-        k: usize,
-        ef: usize,
-        filter: Option<&Filter>,
-    ) -> Result<Vec<(f32, Id)>> {
-        let metric = self.config.metric;
+/// 1 回の検索でセグメント群に適用する共有コンテキスト (todo 801)。
+/// 呼び出しスレッドとプールのジョブが Arc で共有する。
+struct SegmentSearch {
+    view: LiveView,
+    query: Vec<f32>,
+    k: usize,
+    ef: usize,
+    metric: Metric,
+    filter: Option<Filter>,
+}
+
+impl SegmentSearch {
+    /// セグメント 1 個 (view.segments[index]) の検索プラン
+    /// (docs/design/index.md §4–5)。
+    fn segment(&self, index: usize) -> Result<Vec<(f32, Id)>> {
+        let seg: &Segment = &self.view.segments[index];
+        let rank = self.view.memtables().len() + index;
+        let view = &self.view;
+        let (query, k, ef, metric) = (self.query.as_slice(), self.k, self.ef, self.metric);
+        let filter = self.filter.as_ref();
         let n = seg.len() as u32;
         let live = |row: u32| view.is_live(seg.id(row), rank);
 

@@ -92,7 +92,10 @@ memtable は常に正確検索されます。
 ## 実行の並列性
 
 複数セグメントを持つ collection では、セグメントごとの探索が
-スレッド並列で実行されます (セグメント 1 個以下では逐次)。
+Database 全体で共有する常駐スレッドプールで並列実行されます
+(セグメント 1 個以下では逐次)。並列度は
+[`StoreOptions.search_threads`](configuration.md#storeoptions)
+で指定します (0 = 自動 = 論理コア数、1 = 逐次)。
 
 ## 計算量の目安
 

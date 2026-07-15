@@ -27,6 +27,7 @@
 
 mod collection;
 mod database;
+mod pool;
 
 pub use collection::{Collection, CollectionConfig, SearchBuilder, SearchHit};
 pub use database::Database;

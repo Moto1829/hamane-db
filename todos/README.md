@@ -147,5 +147,15 @@ M7 完了 (2026-07-15)。実装メモ:
 - 705: 静的 API キー (Bearer / X-Api-Key、定数時間比較)。キー未指定は
   認証なし + 起動時警告。TLS は引き続きリバースプロキシ前提
 
-将来候補 (未タスク化): 検索スレッドプール化、レプリケーション (WAL シッピング)、
+## M8: 検索基盤の改善 (2026-07-15 計画)
+
+| # | タスク | Depends |
+|---|---|---|
+| ✅ [801](801-search-thread-pool.md) | 検索スレッドプール化 | 503 |
+
+801 実装メモ: 検索ごとの thread::scope を Database 共有の常駐プール
+(std のみ、遅延起動、worker = `StoreOptions::search_threads` − 1 本) に
+置き換え。SIFT 200k / 2 セグメントで QPS +14% (docs/benchmarks.md 参照)。
+
+将来候補 (未タスク化): レプリケーション (WAL シッピング)、
 crates.io / PyPI 公開。

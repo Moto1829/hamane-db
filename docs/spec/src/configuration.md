@@ -15,6 +15,7 @@ let db = Database::open_with_options("./mydb", StoreOptions {
     hnsw_min_rows: 1024,
     compaction_threshold: 4,
     sq8: false,
+    search_threads: 0,
 })?;
 ```
 
@@ -29,6 +30,7 @@ open 時に `InvalidConfig` エラーになります。
 | `hnsw_min_rows` | 1024 | この行数未満のセグメントは HNSW を作らない (Flat で検索) |
 | `compaction_threshold` | 4 | セグメント数がこの値以上で自動コンパクション |
 | `sq8` | false | SQ8 量子化 ([検索](search.md#sq8-量子化による高速化) 参照) |
+| `search_threads` | 0 (自動 = 論理コア数) | セグメント並列検索の並列度。1 で逐次。プールは Database 全体で共有され、初回の複数セグメント検索まで worker は起動しない |
 
 ## SyncPolicy
 

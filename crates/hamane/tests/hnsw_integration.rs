@@ -334,3 +334,84 @@ fn hnsw_survives_reopen() {
     // Cosine: スコアは類似度 (降順)
     assert!(hits.windows(2).all(|w| w[0].score >= w[1].score));
 }
+
+/// todo 801: search_threads の設定 (逐次 / プール / 自動) で検索結果が
+/// 変わらないこと。セグメントは open 時にディスクから読むだけなので、
+/// 同じ DB を開き直せば結果は完全一致するはず。
+#[test]
+fn search_threads_settings_agree() {
+    let Fixture { db, data: _, _dir } = fixture(2000);
+    drop(db); // process lock を放してから別オプションで開き直す
+
+    let mut rng = StdRng::seed_from_u64(1801);
+    let queries: Vec<Vec<f32>> = (0..20).map(|_| random_vec(&mut rng)).collect();
+
+    // (フィルタなし, フィルタあり) の hit id 列を全クエリ分collect する
+    let run_all = |search_threads: usize| -> Vec<(Vec<u64>, Vec<u64>)> {
+        let db = Database::open_with_options(
+            _dir.path(),
+            StoreOptions {
+                hnsw_min_rows: 64,
+                search_threads,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let col = db.collection("docs").unwrap();
+        let ids =
+            |hits: Vec<hamane::SearchHit>| -> Vec<u64> { hits.iter().map(|h| h.id).collect() };
+        queries
+            .iter()
+            .map(|q| {
+                let plain = ids(col.search(q).k(10).run().unwrap());
+                let filtered = ids(col
+                    .search(q)
+                    .k(10)
+                    .filter(Filter::eq("mod10", 3i64))
+                    .run()
+                    .unwrap());
+                (plain, filtered)
+            })
+            .collect()
+    };
+
+    let sequential = run_all(1);
+    assert!(sequential.iter().all(|(plain, _)| plain.len() == 10));
+    assert_eq!(sequential, run_all(2), "pool (2) differs from sequential");
+    assert_eq!(
+        sequential,
+        run_all(0),
+        "pool (auto) differs from sequential"
+    );
+}
+
+/// todo 801: 同一 Database への同時多発検索。共有プールでも各検索が
+/// 単独実行と同じ結果を返すこと。
+#[test]
+fn concurrent_searches_are_consistent() {
+    let fx = fixture(1000);
+    let col = fx.db.collection("docs").unwrap();
+    let ids = |q: &[f32]| -> Vec<u64> {
+        col.search(q)
+            .k(10)
+            .run()
+            .unwrap()
+            .iter()
+            .map(|h| h.id)
+            .collect()
+    };
+
+    let mut rng = StdRng::seed_from_u64(2801);
+    let queries: Vec<Vec<f32>> = (0..10).map(|_| random_vec(&mut rng)).collect();
+    let expected: Vec<Vec<u64>> = queries.iter().map(|q| ids(q)).collect();
+
+    std::thread::scope(|s| {
+        for _ in 0..8 {
+            s.spawn(|| {
+                for (q, want) in queries.iter().zip(&expected) {
+                    assert_eq!(&ids(q), want);
+                }
+            });
+        }
+    });
+}
