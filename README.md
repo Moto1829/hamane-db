@@ -63,6 +63,20 @@ curl -X POST localhost:8080/collections/docs/search -H 'content-type: applicatio
      -d '{"vector": [0.1, 0.2, 0.3, 0.4], "k": 5, "filter": {"eq": ["lang", "ja"]}}'
 ```
 
+### Docker
+
+Rust ツールチェーンなしで動かす場合 (静的リンクの scratch イメージ、十数 MB):
+
+```sh
+docker run -p 8080:8080 -v hamane-data:/data -e HAMANE_API_KEY=my-secret \
+    ghcr.io/moto1829/hamane-db:latest
+# または docker compose up (docker-compose.yml 参照) / docker build -t hamane-db .
+```
+
+データは `/data` (名前付きボリューム) に永続化され、`docker stop` (SIGTERM) で
+flush してから終了する。`/health` が認証不要の死活確認エンドポイントで、
+イメージの HEALTHCHECK も同じものを使う。
+
 ## Python
 
 ```sh

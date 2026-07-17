@@ -152,6 +152,7 @@ M7 完了 (2026-07-15)。実装メモ:
 | # | タスク | Depends |
 |---|---|---|
 | ✅ [801](801-search-thread-pool.md) | 検索スレッドプール化 | 503 |
+| ✅ [802](802-docker.md) | Docker イメージ | 603, 705 |
 
 801 実装メモ: 検索ごとの thread::scope を Database 共有の常駐プール
 (std のみ、遅延起動、worker = `StoreOptions::search_threads` − 1 本) に

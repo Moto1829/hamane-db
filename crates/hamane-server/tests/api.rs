@@ -268,3 +268,22 @@ async fn admin_flush_and_compact_with_persistence() {
         .collect();
     assert_eq!(ids, vec![0, 1, 2]);
 }
+
+/// todo 802: /health は認証の有無にかかわらずキーなしで 200 を返す
+/// (Docker HEALTHCHECK / k8s probe は API キーを持たないため)。
+#[tokio::test]
+async fn health_endpoint_bypasses_auth() {
+    let (status, body) = request(&test_app(), "GET", "/health", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "ok");
+
+    let authed =
+        hamane_server::router_with_auth(Arc::new(Database::in_memory()), Some("secret-key".into()));
+    let (status, body) = request(&authed, "GET", "/health", None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "health must not require the API key"
+    );
+    assert_eq!(body["status"], "ok");
+}

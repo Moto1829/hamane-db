@@ -1,0 +1,16 @@
+# hamane-server の最小構成例 (todo 802)。
+#   HAMANE_API_KEY=secret docker compose up
+services:
+  hamane:
+    image: ghcr.io/moto1829/hamane-db:latest
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - hamane-data:/data
+    environment:
+      # 未設定なら認証なしで起動する (起動ログに警告が出る)
+      HAMANE_API_KEY: ${HAMANE_API_KEY:-}
+
+volumes:
+  hamane-data:

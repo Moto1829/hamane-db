@@ -15,6 +15,16 @@ CLI を使う場合:
 cargo install --git https://github.com/Moto1829/hamane-db hamane-cli
 ```
 
+HTTP サーバを Docker で立てる場合 (Rust ツールチェーン不要):
+
+```sh
+docker run -p 8080:8080 -v hamane-data:/data -e HAMANE_API_KEY=my-secret \
+    ghcr.io/moto1829/hamane-db:latest
+```
+
+データは `/data` ボリュームに永続化され、`docker stop` (SIGTERM) で flush
+してから終了します。`GET /health` は認証不要の死活確認エンドポイントです。
+
 ## 最小の例
 
 ```rust

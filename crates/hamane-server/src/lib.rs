@@ -12,6 +12,7 @@
 //! | POST | /collections/{name}/search | 検索 (vector, k, ef, filter) |
 //! | POST | /admin/flush | フラッシュ |
 //! | POST | /admin/compact | コンパクション |
+//! | GET | /health | 死活確認 (**認証不要**。orchestrator の probe 用) |
 //!
 //! 認証は静的 API キー (todo 705): `router_with_auth(db, Some(key))` で
 //! 全エンドポイントが `Authorization: Bearer <key>` または
@@ -63,7 +64,7 @@ pub fn router_with_auth(db: Arc<Database>, api_key: Option<String>) -> Router {
         .route("/admin/flush", post(flush))
         .route("/admin/compact", post(compact))
         .with_state(AppState { db });
-    match api_key {
+    let router = match api_key {
         Some(key) => {
             let key = Arc::new(key);
             router.layer(middleware::from_fn(move |req, next| {
@@ -72,7 +73,10 @@ pub fn router_with_auth(db: Arc<Database>, api_key: Option<String>) -> Router {
             }))
         }
         None => router,
-    }
+    };
+    // /health は認証レイヤの外 (todo 802)。API キーを持たない
+    // orchestrator (Docker HEALTHCHECK / k8s probe) から叩けるようにする
+    router.route("/health", get(|| async { Json(json!({"status": "ok"})) }))
 }
 
 /// 定数時間の等価比較 (タイミング攻撃対策)。

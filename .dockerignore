@@ -1,0 +1,7 @@
+# ビルドに必要なものだけ送る (最後にマッチしたパターンが勝つ)
+*
+!Cargo.toml
+!Cargo.lock
+!crates/
+crates/hamane-py/.venv/
+crates/**/target/
