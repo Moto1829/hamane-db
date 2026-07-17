@@ -13,6 +13,10 @@
 //! | POST | /admin/flush | フラッシュ |
 //! | POST | /admin/compact | コンパクション |
 //! | GET | /health | 死活確認 (**認証不要**。orchestrator の probe 用) |
+//! | GET | /replication/state | レプリカ同期用の世代情報 (todo 902) |
+//! | GET | /replication/manifest/{gen} | MANIFEST ファイル |
+//! | GET | /replication/segment/{cid}/{seg}/{file} | セグメントファイル |
+//! | GET | /replication/wal/{seq}?offset=N | WAL の tail 読み |
 //!
 //! 認証は静的 API キー (todo 705): `router_with_auth(db, Some(key))` で
 //! 全エンドポイントが `Authorization: Bearer <key>` または
@@ -63,6 +67,13 @@ pub fn router_with_auth(db: Arc<Database>, api_key: Option<String>) -> Router {
         .route("/collections/{name}/search", post(search))
         .route("/admin/flush", post(flush))
         .route("/admin/compact", post(compact))
+        .route("/replication/state", get(replication_state))
+        .route("/replication/manifest/{gen}", get(replication_manifest))
+        .route(
+            "/replication/segment/{collection_id}/{seg_id}/{file}",
+            get(replication_segment),
+        )
+        .route("/replication/wal/{seq}", get(replication_wal))
         .with_state(AppState { db });
     let router = match api_key {
         Some(key) => {
@@ -495,6 +506,139 @@ async fn compact(State(state): State<AppState>) -> Result<Json<Value>, ApiError>
         db.flush()?;
         db.compact()?;
         Ok(Json(json!({"compacted": true})))
+    })
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// レプリケーション (todo 902、docs/design/replication.md §2)
+//
+// primary 側はストレージエンジンに触れず db_dir のファイルを読むだけ。
+// manifest / セグメントは不変、WAL は append-only なのでロック不要。
+// 競合 (rotate / コンパクション後の削除) は 404 になり、replica が
+// state からの再同期で回復する。
+// ---------------------------------------------------------------------------
+
+/// レプリケーション対象のディレクトリ (in-memory DB は対象外)。
+fn replication_dir(state: &AppState) -> Result<std::path::PathBuf, ApiError> {
+    state
+        .db
+        .path()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| bad_request("replication requires a persistent database"))
+}
+
+/// io::Error → 404 (NotFound) / 500 の対応。
+fn io_api_error(e: std::io::Error) -> ApiError {
+    let status = if e.kind() == std::io::ErrorKind::NotFound {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    ApiError(status, e.to_string())
+}
+
+async fn replication_state(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let dir = replication_dir(&state)?;
+    blocking(move || {
+        let current = std::fs::read_to_string(dir.join(hamane_storage::manifest::CURRENT_FILE))
+            .map_err(io_api_error)?;
+        let manifest_name = current.trim().to_string();
+        let manifest_gen: u64 = manifest_name
+            .strip_prefix("MANIFEST-")
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| {
+                ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("CURRENT points to invalid name: {manifest_name}"),
+                )
+            })?;
+        // アクティブ WAL = 最大 seq。rotate 直後の一瞬は旧 WAL が残り得るが、
+        // state は同期のヒントにすぎず、ずれは次のポーリングで解消する
+        let wal = hamane_storage::wal::list_wal_files(&dir.join("wal"))
+            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let (wal_seq, wal_len) = match wal.last() {
+            Some((seq, path)) => (
+                Some(*seq),
+                std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+            ),
+            None => (None, 0),
+        };
+        Ok(Json(json!({
+            "manifest_gen": manifest_gen,
+            "manifest_name": manifest_name,
+            "wal_seq": wal_seq,
+            "wal_len": wal_len,
+        })))
+    })
+    .await
+}
+
+async fn replication_manifest(
+    State(state): State<AppState>,
+    Path(gen): Path<u64>,
+) -> Result<Vec<u8>, ApiError> {
+    let dir = replication_dir(&state)?;
+    blocking(move || {
+        std::fs::read(dir.join(hamane_storage::manifest::manifest_file_name(gen)))
+            .map_err(io_api_error)
+    })
+    .await
+}
+
+async fn replication_segment(
+    State(state): State<AppState>,
+    Path((collection_id, seg_id, file)): Path<(u32, u64, String)>,
+) -> Result<Vec<u8>, ApiError> {
+    use hamane_storage::segment as seg;
+    // パストラバーサル防止: セグメント構成ファイル名のみ許可
+    const ALLOWED: [&str; 6] = [
+        seg::FILE_VECTORS,
+        seg::FILE_IDS,
+        seg::FILE_META,
+        seg::FILE_TOMBSTONES,
+        seg::FILE_HNSW,
+        seg::FILE_SQ8,
+    ];
+    if !ALLOWED.contains(&file.as_str()) {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("unknown segment file: {file}"),
+        ));
+    }
+    let dir = replication_dir(&state)?;
+    blocking(move || {
+        let path = dir
+            .join("collections")
+            .join(collection_id.to_string())
+            .join(seg::segment_dir_name(seg_id))
+            .join(&file);
+        std::fs::read(path).map_err(io_api_error)
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct WalQuery {
+    #[serde(default)]
+    offset: u64,
+}
+
+async fn replication_wal(
+    State(state): State<AppState>,
+    Path(seq): Path<u64>,
+    axum::extract::Query(q): axum::extract::Query<WalQuery>,
+) -> Result<Vec<u8>, ApiError> {
+    let dir = replication_dir(&state)?;
+    blocking(move || {
+        use std::io::{Read, Seek, SeekFrom};
+        let path = dir.join("wal").join(hamane_storage::wal::wal_file_name(seq));
+        let mut f = std::fs::File::open(path).map_err(io_api_error)?;
+        // offset がファイル末尾以降なら空 (追記待ち。エラーではない)
+        f.seek(SeekFrom::Start(q.offset)).map_err(io_api_error)?;
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf).map_err(io_api_error)?;
+        Ok(buf)
     })
     .await
 }

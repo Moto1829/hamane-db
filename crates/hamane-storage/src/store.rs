@@ -438,6 +438,11 @@ impl Store {
         &self.shared.options
     }
 
+    /// データベースディレクトリ (in-memory なら None)。
+    pub fn db_dir(&self) -> Option<&Path> {
+        self.shared.db_dir.as_deref()
+    }
+
     /// 永続化なしの Store (従来の in-memory モード)。メンテナンススレッドは持たない。
     pub fn in_memory() -> Self {
         Self {

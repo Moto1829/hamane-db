@@ -158,5 +158,19 @@ M7 完了 (2026-07-15)。実装メモ:
 (std のみ、遅延起動、worker = `StoreOptions::search_threads` − 1 本) に
 置き換え。SIFT 200k / 2 セグメントで QPS +14% (docs/benchmarks.md 参照)。
 
-将来候補 (未タスク化): レプリケーション (WAL シッピング)、
-crates.io / PyPI 公開。
+## M9: レプリケーション (2026-07-18 計画)
+
+設計: [docs/design/replication.md](../docs/design/replication.md)。
+単方向・非同期・pull 型の read レプリカ。WAL 保持・ACK なし
+(manifest + 不変セグメント = 完全スナップショットに常にフォールバック可能)。
+
+| # | タスク | Depends |
+|---|---|---|
+| ✅ [901](901-replication-design.md) | 設計文書 | — |
+| ✅ [902](902-replication-api.md) | primary 側 /replication API | 901 |
+| 🚧 [903](903-follower-mode.md) | hamane-storage の follower モード | 901 |
+| ⬜ [904](904-replica-puller.md) | replica puller と --replicate-from | 902, 903 |
+| ⬜ [905](905-replication-docs.md) | 昇格検証とドキュメント | 904 |
+
+将来候補 (未タスク化): crates.io / PyPI 公開 (実装優先のため保留)、
+AVX2 SQ8 カーネル (x86_64 検証環境待ち)。

@@ -77,6 +77,11 @@ impl Database {
         )))
     }
 
+    /// データベースディレクトリ (in-memory なら None)。
+    pub fn path(&self) -> Option<&Path> {
+        self.store.db_dir()
+    }
+
     /// Collection を削除する。
     pub fn drop_collection(&self, name: &str) -> Result<()> {
         self.store.drop_collection(name)

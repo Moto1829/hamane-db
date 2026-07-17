@@ -471,6 +471,7 @@ dependencies = [
  "axum",
  "clap",
  "hamane",
+ "hamane-storage",
  "http-body-util",
  "serde",
  "serde_json",
