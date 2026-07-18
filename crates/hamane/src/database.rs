@@ -82,6 +82,41 @@ impl Database {
         self.store.db_dir()
     }
 
+    /// レプリカ (読み取り専用 follower) として開く (todo 904)。
+    ///
+    /// 書き込み API は `HamaneError::ReadOnlyReplica` を返す。状態の更新は
+    /// 同期ループが `apply_wal_frames` / `switch_generation` で行う
+    /// (docs/design/replication.md)。検索・点参照は通常どおり使える。
+    pub fn open_replica(path: impl AsRef<Path>, options: StoreOptions) -> Result<Self> {
+        let search_pool = Arc::new(SearchPool::new(options.search_threads));
+        Ok(Self {
+            store: Arc::new(Store::open_follower(path.as_ref(), options)?),
+            search_pool,
+        })
+    }
+
+    /// レプリカモードか。
+    pub fn is_replica(&self) -> bool {
+        self.store.is_follower()
+    }
+
+    /// 現在の manifest 世代 (監視用。in-memory は常に 0)。
+    pub fn manifest_gen(&self) -> u64 {
+        self.store.manifest_gen()
+    }
+
+    /// レプリカ専用: fetch した WAL フレーム列を適用し、消費バイト数を返す
+    /// (同期ループ内部用。docs/design/replication.md §3)。
+    pub fn apply_wal_frames(&self, bytes: &[u8]) -> Result<usize> {
+        self.store.apply_wal_frames(bytes)
+    }
+
+    /// レプリカ専用: ディスク上の新しい世代へ状態を切り替える
+    /// (同期ループ内部用)。切り替えたら true。
+    pub fn switch_generation(&self) -> Result<bool> {
+        self.store.switch_generation()
+    }
+
     /// Collection を削除する。
     pub fn drop_collection(&self, name: &str) -> Result<()> {
         self.store.drop_collection(name)

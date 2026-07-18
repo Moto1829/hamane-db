@@ -79,7 +79,8 @@ impl Manifest {
         buf
     }
 
-    fn decode(buf: &[u8]) -> Result<Self> {
+    /// バイト列からデコードする (レプリカが fetch した manifest の解釈にも使う)。
+    pub fn decode(buf: &[u8]) -> Result<Self> {
         if buf.len() < MAGIC_MANIFEST.len() + 4
             || (buf[..8] != MAGIC_MANIFEST && buf[..8] != MAGIC_MANIFEST_V2)
         {

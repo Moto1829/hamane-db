@@ -445,6 +445,21 @@ impl Store {
         self.shared.db_dir.as_deref()
     }
 
+    /// レプリカ (follower) モードか (todo 903)。
+    pub fn is_follower(&self) -> bool {
+        self.shared.follower
+    }
+
+    /// 現在の manifest 世代 (in-memory は常に 0)。
+    pub fn manifest_gen(&self) -> u64 {
+        self.shared
+            .state
+            .lock()
+            .expect("lock poisoned")
+            .manifest
+            .gen
+    }
+
     /// 永続化なしの Store (従来の in-memory モード)。メンテナンススレッドは持たない。
     pub fn in_memory() -> Self {
         Self {

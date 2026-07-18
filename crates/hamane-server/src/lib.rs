@@ -23,6 +23,8 @@
 //! `X-Api-Key: <key>` を要求する。TLS はスコープ外 (リバースプロキシ前提)。
 //! レコード・フィルタの JSON 表現は CLI (hamane-cli) と同一。
 
+pub mod replica;
+
 use std::sync::Arc;
 
 use axum::extract::{Path, Request, State};
@@ -51,6 +53,7 @@ pub fn router(db: Arc<Database>) -> Router {
 /// ルーターを構築する。`api_key` が Some なら全エンドポイントで
 /// `Authorization: Bearer <key>` または `X-Api-Key: <key>` を要求する。
 pub fn router_with_auth(db: Arc<Database>, api_key: Option<String>) -> Router {
+    let health_db = Arc::clone(&db);
     let router = Router::new()
         .route("/collections", get(list_collections))
         .route(
@@ -86,8 +89,21 @@ pub fn router_with_auth(db: Arc<Database>, api_key: Option<String>) -> Router {
         None => router,
     };
     // /health は認証レイヤの外 (todo 802)。API キーを持たない
-    // orchestrator (Docker HEALTHCHECK / k8s probe) から叩けるようにする
-    router.route("/health", get(|| async { Json(json!({"status": "ok"})) }))
+    // orchestrator (Docker HEALTHCHECK / k8s probe) から叩けるようにする。
+    // role / manifest_gen はレプリカ構成の監視用 (todo 904)
+    router.route(
+        "/health",
+        get(move || {
+            let db = Arc::clone(&health_db);
+            async move {
+                Json(json!({
+                    "status": "ok",
+                    "role": if db.is_replica() { "replica" } else { "primary" },
+                    "manifest_gen": db.manifest_gen(),
+                }))
+            }
+        }),
+    )
 }
 
 /// 定数時間の等価比較 (タイミング攻撃対策)。

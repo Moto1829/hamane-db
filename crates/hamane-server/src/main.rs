@@ -29,6 +29,13 @@ struct Args {
     /// scratch イメージの Docker HEALTHCHECK 用 (todo 802)
     #[arg(long)]
     healthcheck: bool,
+    /// レプリカとして起動し、この primary URL から同期する (todo 904)。
+    /// 例: http://primary:8080。書き込み API は 409 を返す
+    #[arg(long, env = "HAMANE_REPLICATE_FROM")]
+    replicate_from: Option<String>,
+    /// レプリカのポーリング間隔 (ミリ秒)
+    #[arg(long, env = "HAMANE_POLL_INTERVAL_MS", default_value_t = 1000)]
+    poll_interval_ms: u64,
 }
 
 /// listen アドレスの /health を std::net だけで叩く (Docker HEALTHCHECK 用。
@@ -88,7 +95,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.api_key.is_none() {
         eprintln!("warning: no API key configured (--api-key / HAMANE_API_KEY); the server is unauthenticated");
     }
-    let db = Arc::new(Database::open(db_path)?);
+    let db = if args.replicate_from.is_some() {
+        Arc::new(Database::open_replica(db_path, Default::default())?)
+    } else {
+        Arc::new(Database::open(db_path)?)
+    };
+
+    // レプリカ: 同期ループをデーモンスレッドで回す (todo 904)
+    if let Some(primary) = &args.replicate_from {
+        let sync = hamane_server::replica::ReplicaSync::new(
+            primary.clone(),
+            args.api_key.clone(),
+            Arc::clone(&db),
+        );
+        let interval = std::time::Duration::from_millis(args.poll_interval_ms.max(1));
+        std::thread::Builder::new()
+            .name("hamane-replica-sync".into())
+            .spawn(move || sync.run(interval))
+            .expect("failed to spawn replica sync thread");
+        eprintln!(
+            "replicating from {primary} every {}ms",
+            args.poll_interval_ms
+        );
+    }
+
     let app = hamane_server::router_with_auth(Arc::clone(&db), args.api_key);
 
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;
@@ -101,6 +131,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("shutting down (flushing)...");
         })
         .await?;
-    db.flush()?;
+    if !db.is_replica() {
+        db.flush()?;
+    }
     Ok(())
 }
