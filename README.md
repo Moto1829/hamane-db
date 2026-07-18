@@ -63,6 +63,18 @@ curl -X POST localhost:8080/collections/docs/search -H 'content-type: applicatio
      -d '{"vector": [0.1, 0.2, 0.3, 0.4], "k": 5, "filter": {"eq": ["lang", "ja"]}}'
 ```
 
+### read レプリカ
+
+`--replicate-from` で読み取り専用レプリカを立てられる (pull 型・非同期。
+検索の水平スケールと手動フェイルオーバー用。詳細は仕様書の
+「レプリケーション」参照):
+
+```sh
+hamane-server --db ./replica-db --listen 0.0.0.0:8081 --api-key my-secret \
+    --replicate-from http://primary:8080
+# 昇格 = --replicate-from を外して起動し直すだけ
+```
+
 ### Docker
 
 Rust ツールチェーンなしで動かす場合 (静的リンクの scratch イメージ、十数 MB):

@@ -12,5 +12,18 @@ services:
       # 未設定なら認証なしで起動する (起動ログに警告が出る)
       HAMANE_API_KEY: ${HAMANE_API_KEY:-}
 
+  # read レプリカの例 (todo 905)。--scale replica=N で台数を増やせる
+  # replica:
+  #   image: ghcr.io/moto1829/hamane-db:latest
+  #   build: .
+  #   ports:
+  #     - "8081:8080"
+  #   volumes:
+  #     - hamane-replica:/data
+  #   environment:
+  #     HAMANE_API_KEY: ${HAMANE_API_KEY:-}
+  #     HAMANE_REPLICATE_FROM: http://hamane:8080
+
 volumes:
   hamane-data:
+  # hamane-replica:

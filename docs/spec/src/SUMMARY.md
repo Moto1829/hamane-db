@@ -8,6 +8,7 @@
 - [データモデル](data-model.md)
 - [検索](search.md)
 - [永続化と耐久性](persistence.md)
+- [レプリケーション](replication.md)
 - [設定リファレンス](configuration.md)
 - [エラーリファレンス](errors.md)
 - [CLI リファレンス](cli.md)

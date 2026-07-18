@@ -170,7 +170,15 @@ M7 完了 (2026-07-15)。実装メモ:
 | ✅ [902](902-replication-api.md) | primary 側 /replication API | 901 |
 | ✅ [903](903-follower-mode.md) | hamane-storage の follower モード | 901 |
 | ✅ [904](904-replica-puller.md) | replica puller と --replicate-from | 902, 903 |
-| 🚧 [905](905-replication-docs.md) | 昇格検証とドキュメント | 904 |
+| ✅ [905](905-replication-docs.md) | 昇格検証とドキュメント | 904 |
+
+M9 完了 (2026-07-18)。実装メモ:
+- WAL 保持・ACK なしの pull 型 (設計どおり)。primary はファイルを読むだけで
+  エンジン変更ゼロ。replica はディスクレイアウトを primary と同一に保ち、
+  昇格 = --replicate-from を外して開き直すだけ
+- HTTP クライアントは std::net の最小実装 (Content-Length 前提、
+  chunked 非対応 = 直結前提)
+- 902〜904 で結合テスト 4 本 + E2E 3 本 + follower 単体 5 本
 
 将来候補 (未タスク化): crates.io / PyPI 公開 (実装優先のため保留)、
 AVX2 SQ8 カーネル (x86_64 検証環境待ち)。
