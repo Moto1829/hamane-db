@@ -86,7 +86,7 @@ impl WalRecord {
         body
     }
 
-    fn decode(body: &[u8]) -> Result<Self> {
+    pub(crate) fn decode(body: &[u8]) -> Result<Self> {
         let mut r = Reader::new(body);
         let record = match r.u8()? {
             TYPE_UPSERT => {

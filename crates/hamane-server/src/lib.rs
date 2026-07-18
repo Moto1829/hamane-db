@@ -128,7 +128,8 @@ impl From<HamaneError> for ApiError {
             | HamaneError::InvalidVector(_)
             | HamaneError::InvalidConfig(_) => StatusCode::BAD_REQUEST,
             HamaneError::CollectionNotFound(_) => StatusCode::NOT_FOUND,
-            HamaneError::CollectionExists(_) => StatusCode::CONFLICT,
+            // replica への書き込み (todo 903)。primary に送るべきリクエスト
+            HamaneError::CollectionExists(_) | HamaneError::ReadOnlyReplica => StatusCode::CONFLICT,
             HamaneError::Corrupted(_) | HamaneError::Io(_) | HamaneError::Locked(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -632,7 +633,9 @@ async fn replication_wal(
     let dir = replication_dir(&state)?;
     blocking(move || {
         use std::io::{Read, Seek, SeekFrom};
-        let path = dir.join("wal").join(hamane_storage::wal::wal_file_name(seq));
+        let path = dir
+            .join("wal")
+            .join(hamane_storage::wal::wal_file_name(seq));
         let mut f = std::fs::File::open(path).map_err(io_api_error)?;
         // offset がファイル末尾以降なら空 (追記待ち。エラーではない)
         f.seek(SeekFrom::Start(q.offset)).map_err(io_api_error)?;

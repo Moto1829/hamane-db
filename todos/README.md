@@ -168,8 +168,8 @@ M7 完了 (2026-07-15)。実装メモ:
 |---|---|---|
 | ✅ [901](901-replication-design.md) | 設計文書 | — |
 | ✅ [902](902-replication-api.md) | primary 側 /replication API | 901 |
-| 🚧 [903](903-follower-mode.md) | hamane-storage の follower モード | 901 |
-| ⬜ [904](904-replica-puller.md) | replica puller と --replicate-from | 902, 903 |
+| ✅ [903](903-follower-mode.md) | hamane-storage の follower モード | 901 |
+| 🚧 [904](904-replica-puller.md) | replica puller と --replicate-from | 902, 903 |
 | ⬜ [905](905-replication-docs.md) | 昇格検証とドキュメント | 904 |
 
 将来候補 (未タスク化): crates.io / PyPI 公開 (実装優先のため保留)、

@@ -329,6 +329,8 @@ struct Shared {
     flush_done: Condvar,
     /// プロセス排他ロック (todo 702)。fd が開いている間 flock を保持する
     _process_lock: Option<std::fs::File>,
+    /// レプリカモード (todo 903)。true なら書き込み API を拒否する
+    follower: bool,
 }
 
 /// データベース 1 個分の永続化装置。`Send + Sync`。
@@ -459,6 +461,7 @@ impl Store {
                 }),
                 flush_done: Condvar::new(),
                 _process_lock: None,
+                follower: false,
             }),
             maint_tx: None,
             maint_join: Mutex::new(None),
@@ -473,6 +476,68 @@ impl Store {
         std::fs::create_dir_all(wal_dir(db_dir))?;
         std::fs::create_dir_all(collections_dir(db_dir))?;
 
+        let (mut state, max_seq) = Self::load_state(db_dir)?;
+
+        // 6. 新しいアクティブ WAL (既存はそのまま残し、次のフラッシュで削除)
+        let new_seq = max_seq + 1;
+        let writer =
+            WalWriter::create(&wal_dir(db_dir).join(wal_file_name(new_seq)), options.sync)?;
+        state.wal = Some((new_seq, writer));
+
+        // 7. メンテナンススレッド起動
+        let shared = Arc::new(Shared {
+            db_dir: Some(db_dir.to_path_buf()),
+            options,
+            state: Mutex::new(state),
+            flush_done: Condvar::new(),
+            _process_lock: Some(process_lock),
+            follower: false,
+        });
+        let (tx, rx) = mpsc::channel();
+        let maint_shared = Arc::clone(&shared);
+        let join = std::thread::Builder::new()
+            .name("hamane-maint".into())
+            .spawn(move || maint_shared.maintenance_loop(rx))
+            .expect("failed to spawn maintenance thread");
+
+        Ok(Self {
+            shared,
+            maint_tx: Some(tx),
+            maint_join: Mutex::new(Some(join)),
+        })
+    }
+
+    /// レプリカとして開く (todo 903、docs/design/replication.md §4)。
+    ///
+    /// 書き込み API は `ReadOnlyReplica` を返し、アクティブ WAL の作成・
+    /// メンテナンススレッド (自動フラッシュ・コンパクション) を行わない。
+    /// 状態の更新は同期ループ (904) が `apply_wal_frames` /
+    /// `switch_generation` で行う。flock は通常どおり取る。
+    pub fn open_follower(db_dir: &Path, options: StoreOptions) -> Result<Self> {
+        options.validate()?;
+        std::fs::create_dir_all(db_dir)?;
+        let process_lock = acquire_process_lock(db_dir)?;
+        std::fs::create_dir_all(wal_dir(db_dir))?;
+        std::fs::create_dir_all(collections_dir(db_dir))?;
+
+        let (state, _max_seq) = Self::load_state(db_dir)?;
+        Ok(Self {
+            shared: Arc::new(Shared {
+                db_dir: Some(db_dir.to_path_buf()),
+                options,
+                state: Mutex::new(state),
+                flush_done: Condvar::new(),
+                _process_lock: Some(process_lock),
+                follower: true,
+            }),
+            maint_tx: None,
+            maint_join: Mutex::new(None),
+        })
+    }
+
+    /// ディレクトリからインメモリ状態を構築する (open / switch_generation 共用)。
+    /// storage.md §5 の手順 1〜5。戻り値は (状態, リプレイした最大 WAL seq)。
+    fn load_state(db_dir: &Path) -> Result<(StoreState, u64)> {
         // 1. 空なら初期化
         if !db_dir.join(CURRENT_FILE).exists() {
             Manifest::default().store(db_dir)?;
@@ -540,32 +605,71 @@ impl Store {
         Manifest::gc(db_dir)?;
         cleanup_collection_dirs(db_dir, &state.manifest)?;
 
-        // 6. 新しいアクティブ WAL (既存はそのまま残し、次のフラッシュで削除)
-        let new_seq = max_seq + 1;
-        let writer =
-            WalWriter::create(&wal_dir(db_dir).join(wal_file_name(new_seq)), options.sync)?;
-        state.wal = Some((new_seq, writer));
+        Ok((state, max_seq))
+    }
 
-        // 7. メンテナンススレッド起動
-        let shared = Arc::new(Shared {
-            db_dir: Some(db_dir.to_path_buf()),
-            options,
-            state: Mutex::new(state),
-            flush_done: Condvar::new(),
-            _process_lock: Some(process_lock),
-        });
-        let (tx, rx) = mpsc::channel();
-        let maint_shared = Arc::clone(&shared);
-        let join = std::thread::Builder::new()
-            .name("hamane-maint".into())
-            .spawn(move || maint_shared.maintenance_loop(rx))
-            .expect("failed to spawn maintenance thread");
+    /// 書き込み API の共通ガード (todo 903)。
+    fn ensure_writable(&self) -> Result<()> {
+        if self.shared.follower {
+            Err(HamaneError::ReadOnlyReplica)
+        } else {
+            Ok(())
+        }
+    }
 
-        Ok(Self {
-            shared,
-            maint_tx: Some(tx),
-            maint_join: Mutex::new(Some(join)),
-        })
+    /// follower モード専用 (todo 903): fetch した WAL フレーム列を状態に適用する。
+    ///
+    /// `bytes` は WAL ファイルの magic を除いたフレーム境界から始まること。
+    /// 適用した完全なフレームのバイト数を返す。末尾の不完全なフレーム
+    /// (長さ不足・CRC 不一致) は「まだ届いていない」として残し、呼び出し側が
+    /// 続きを連結して再度渡す (ローカル復旧の停止規則と同じ。storage.md §2)。
+    ///
+    /// 呼び出しは同期ループの単一スレッドから行うこと (`switch_generation` と
+    /// 並行に呼んではならない)。
+    pub fn apply_wal_frames(&self, bytes: &[u8]) -> Result<usize> {
+        if !self.shared.follower {
+            return Err(HamaneError::InvalidConfig(
+                "apply_wal_frames requires a follower store".into(),
+            ));
+        }
+        let mut state = self.shared.state.lock().expect("lock poisoned");
+        let mut pos = 0;
+        while let crate::format::Frame::Ok { body, consumed } =
+            crate::format::read_frame(&bytes[pos..])
+        {
+            // フレームは完全なので decode 失敗は真の破損
+            let record = WalRecord::decode(body)?;
+            Self::apply_record(&mut state, record)?;
+            pos += consumed;
+        }
+        Ok(pos)
+    }
+
+    /// follower モード専用 (todo 903): ディスク上の CURRENT が指す世代へ
+    /// 状態を差し替える。世代が進んでいなければ何もせず false。
+    ///
+    /// 同期ループが新しい manifest・セグメントのファイルを配置し CURRENT を
+    /// 切り替えた後に呼ぶ。旧 LiveView を持つ読者は Arc 経由で旧世代を
+    /// 安全に読み終えられる (コンパクション後の削除と同じ性質)。
+    pub fn switch_generation(&self) -> Result<bool> {
+        if !self.shared.follower {
+            return Err(HamaneError::InvalidConfig(
+                "switch_generation requires a follower store".into(),
+            ));
+        }
+        let db_dir = self.shared.db_dir.as_deref().expect("follower has db_dir");
+        let disk_gen = Manifest::load(db_dir)?.gen;
+        {
+            let state = self.shared.state.lock().expect("lock poisoned");
+            if disk_gen == state.manifest.gen {
+                return Ok(false);
+            }
+        }
+        // 構築 (mmap + セグメント走査 + WAL リプレイ) はロック外で行い、
+        // 差し替えだけロックする
+        let (new_state, _) = Self::load_state(db_dir)?;
+        *self.shared.state.lock().expect("lock poisoned") = new_state;
+        Ok(true)
     }
 
     /// WAL レコードをインメモリ状態に適用する (リプレイ用)。
@@ -650,6 +754,7 @@ impl Store {
         dim: u32,
         metric: Metric,
     ) -> Result<CollectionInfo> {
+        self.ensure_writable()?;
         let token = {
             let mut state = self.shared.state.lock().expect("lock poisoned");
             if state.names.contains_key(name) {
@@ -678,6 +783,7 @@ impl Store {
     }
 
     pub fn drop_collection(&self, name: &str) -> Result<()> {
+        self.ensure_writable()?;
         let token = {
             let mut state = self.shared.state.lock().expect("lock poisoned");
             let Some(&collection_id) = state.names.get(name) else {
@@ -735,6 +841,7 @@ impl Store {
         collection_id: u32,
         records: Vec<(hamane_core::RecordId, StoredRecord)>,
     ) -> Result<()> {
+        self.ensure_writable()?;
         // 文字列 ID の解決・採番と _ext_id 注入 (ロック内で原子的に)
         let resolved: Vec<(Id, StoredRecord)> = {
             let mut state = self.shared.state.lock().expect("lock poisoned");
@@ -767,6 +874,7 @@ impl Store {
 
     /// RecordId (u64 or 文字列) の削除。判定と削除は 1 臨界区間で原子的。
     pub fn delete_record(&self, collection_id: u32, rid: &hamane_core::RecordId) -> Result<bool> {
+        self.ensure_writable()?;
         let id = {
             let state = self.shared.state.lock().expect("lock poisoned");
             Self::check_collection(&state, collection_id)?;
@@ -789,6 +897,7 @@ impl Store {
 
     /// 複数レコードを 1 回の WAL sync でまとめて書く。
     pub fn upsert_batch(&self, collection_id: u32, records: Vec<(Id, StoredRecord)>) -> Result<()> {
+        self.ensure_writable()?;
         let token = {
             let mut state = self.shared.state.lock().expect("lock poisoned");
             Self::check_collection(&state, collection_id)?;
@@ -825,6 +934,7 @@ impl Store {
 
     /// 削除。呼び出し前に id が live だったかを返す (1 臨界区間で判定・適用)。
     pub fn delete(&self, collection_id: u32, id: Id) -> Result<bool> {
+        self.ensure_writable()?;
         let (existed, token) = {
             let mut state = self.shared.state.lock().expect("lock poisoned");
             Self::check_collection(&state, collection_id)?;
@@ -915,6 +1025,7 @@ impl Store {
     /// 全 collection の memtable をセグメントへ書き出し、WAL を世代交代する。
     /// 完了まで待つ (同期セマンティクス)。実行はメンテナンススレッド上。
     pub fn flush(&self) -> Result<()> {
+        self.ensure_writable()?;
         let Some(tx) = &self.maint_tx else {
             return Ok(()); // in-memory は no-op
         };
@@ -965,6 +1076,7 @@ impl Store {
     /// flush とロック取得のわずかな間に入った書き込みはバックアップに含まれない
     /// (バックアップは常に manifest 世代として一貫)。
     pub fn backup(&self, dest: &Path) -> Result<()> {
+        self.ensure_writable()?;
         let Some(db_dir) = self.shared.db_dir.clone() else {
             return Err(HamaneError::InvalidConfig(
                 "cannot backup an in-memory database".into(),
@@ -1013,6 +1125,7 @@ impl Store {
     /// 上書き・tombstone を物理適用するため、ディスク使用量が live データに収束する。
     /// 実行はメンテナンススレッド上 (完了まで待つ)。
     pub fn compact(&self) -> Result<()> {
+        self.ensure_writable()?;
         let Some(tx) = &self.maint_tx else {
             return Ok(()); // in-memory は no-op
         };
@@ -2055,5 +2168,187 @@ mod tests {
         let view = store.view(info.collection_id).unwrap();
         assert_eq!(view.live_len(), 1);
         assert!(view.segments.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // follower モード (todo 903)
+    // -----------------------------------------------------------------------
+
+    /// src 配下を dst へ再帰コピーする。既存ファイルは CURRENT 以外
+    /// 上書きしない (mmap 中のセグメントを truncate しないため。
+    /// 実際の puller も「ないファイルだけ fetch + CURRENT 切り替え」で動く)
+    fn sync_dir(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let to = dst.join(entry.file_name());
+            if entry.path().is_dir() {
+                sync_dir(&entry.path(), &to);
+            } else if !to.exists() || entry.file_name() == CURRENT_FILE {
+                std::fs::copy(entry.path(), &to).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn follower_rejects_writes_but_serves_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let cid = {
+            let store = open(dir.path());
+            let info = store.create_collection("docs", 2, Metric::L2).unwrap();
+            store
+                .upsert(info.collection_id, 1, rec(vec![1.0, 2.0]))
+                .unwrap();
+            info.collection_id
+        }; // 未フラッシュ分は WAL 経由で follower 側に再生される
+
+        let f = Store::open_follower(dir.path(), StoreOptions::default()).unwrap();
+        // 読み取りは通常どおり
+        assert_eq!(f.collection_names(), vec!["docs".to_string()]);
+        let view = f.view(cid).unwrap();
+        assert_eq!(view.live_len(), 1);
+        assert_eq!(view.get(1).unwrap().vector, vec![1.0, 2.0]);
+        // 書き込みはすべて ReadOnlyReplica
+        let deny = |r: Result<()>| {
+            assert!(matches!(r, Err(HamaneError::ReadOnlyReplica)), "{r:?}");
+        };
+        deny(f.create_collection("x", 2, Metric::L2).map(|_| ()));
+        deny(f.drop_collection("docs"));
+        deny(f.upsert(cid, 9, rec(vec![0.0, 0.0])));
+        deny(f.delete(cid, 1).map(|_| ()));
+        deny(f.flush());
+        deny(f.compact());
+        deny(f.backup(&dir.path().join("b")));
+    }
+
+    #[test]
+    fn normal_store_rejects_follower_apis() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        assert!(matches!(
+            store.apply_wal_frames(&[]),
+            Err(HamaneError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            store.switch_generation(),
+            Err(HamaneError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn follower_replays_wal_tail_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let cid = {
+            let store = open(dir.path());
+            let info = store.create_collection("docs", 2, Metric::L2).unwrap();
+            store
+                .upsert(info.collection_id, 1, rec(vec![1.0, 2.0]))
+                .unwrap();
+            store.flush().unwrap();
+            // WAL tail に残す分 (simulate_crash でフラッシュさせない)
+            store
+                .upsert(info.collection_id, 2, rec(vec![3.0, 4.0]))
+                .unwrap();
+            store.delete(info.collection_id, 1).unwrap();
+            let cid = info.collection_id;
+            simulate_crash(store);
+            cid
+        };
+        let f = Store::open_follower(dir.path(), StoreOptions::default()).unwrap();
+        let view = f.view(cid).unwrap();
+        assert_eq!(view.live_len(), 1);
+        assert!(view.get(1).is_none(), "WAL tail の delete が効いている");
+        assert_eq!(view.get(2).unwrap().vector, vec![3.0, 4.0]);
+    }
+
+    #[test]
+    fn apply_wal_frames_stops_at_frame_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let cid = {
+            let store = open(dir.path());
+            store
+                .create_collection("docs", 2, Metric::L2)
+                .unwrap()
+                .collection_id
+        };
+        let f = Store::open_follower(dir.path(), StoreOptions::default()).unwrap();
+
+        // primary が書く WAL と同じバイト列を WalWriter で作る
+        let scratch = tempfile::tempdir().unwrap();
+        let wal_path = scratch.path().join("frames.wal");
+        {
+            let mut w = WalWriter::create(&wal_path, SyncPolicy::Always).unwrap();
+            for (id, v) in [(10u64, [1.0f32, 0.0]), (11, [0.0, 1.0]), (12, [1.0, 1.0])] {
+                w.append(&WalRecord::Upsert {
+                    collection_id: cid,
+                    id,
+                    vector: v.to_vec(),
+                    metadata: Metadata::new(),
+                })
+                .unwrap();
+                w.sync().unwrap();
+            }
+            w.append(&WalRecord::Delete {
+                collection_id: cid,
+                id: 11,
+            })
+            .unwrap();
+            w.sync().unwrap();
+        }
+        let bytes = std::fs::read(&wal_path).unwrap();
+        let frames = &bytes[crate::format::MAGIC_WAL.len()..];
+
+        // フレーム途中で切ったチャンク → 完全な分だけ消費される
+        let cut = frames.len() - 3;
+        let consumed = f.apply_wal_frames(&frames[..cut]).unwrap();
+        assert!(consumed < cut, "末尾の不完全フレームは持ち越し");
+        // 続きを連結して再適用 (puller と同じ扱い)
+        let consumed2 = f.apply_wal_frames(&frames[consumed..]).unwrap();
+        assert_eq!(consumed + consumed2, frames.len());
+
+        let view = f.view(cid).unwrap();
+        assert_eq!(view.live_len(), 2);
+        assert_eq!(view.get(10).unwrap().vector, vec![1.0, 0.0]);
+        assert!(view.get(11).is_none(), "delete フレームも適用される");
+        assert_eq!(view.get(12).unwrap().vector, vec![1.0, 1.0]);
+    }
+
+    #[test]
+    fn switch_generation_adopts_new_manifest() {
+        let primary_dir = tempfile::tempdir().unwrap();
+        let replica_dir = tempfile::tempdir().unwrap();
+
+        let cid = {
+            let store = open(primary_dir.path());
+            let info = store.create_collection("docs", 2, Metric::L2).unwrap();
+            store
+                .upsert(info.collection_id, 1, rec(vec![1.0, 2.0]))
+                .unwrap();
+            store.flush().unwrap(); // gen 前進 (Drop はアクティブ memtable を flush しない)
+            info.collection_id
+        };
+        sync_dir(primary_dir.path(), replica_dir.path());
+        // LOCK はコピー先で意味を持たないが flock は fd 単位なので問題ない
+        let f = Store::open_follower(replica_dir.path(), StoreOptions::default()).unwrap();
+        assert!(!f.switch_generation().unwrap(), "世代が同じなら no-op");
+        let old_view = f.view(cid).unwrap();
+        assert_eq!(old_view.live_len(), 1);
+
+        // primary が次の世代を作る
+        {
+            let store = open(primary_dir.path());
+            store.upsert(cid, 2, rec(vec![3.0, 4.0])).unwrap();
+            store.flush().unwrap();
+        }
+        sync_dir(primary_dir.path(), replica_dir.path());
+
+        assert!(f.switch_generation().unwrap());
+        let view = f.view(cid).unwrap();
+        assert_eq!(view.live_len(), 2);
+        assert_eq!(view.get(2).unwrap().vector, vec![3.0, 4.0]);
+        // 旧 LiveView は切り替え後も安全に読める (Arc 保持)
+        assert_eq!(old_view.live_len(), 1);
+        assert_eq!(old_view.get(1).unwrap().vector, vec![1.0, 2.0]);
+        assert!(!f.switch_generation().unwrap());
     }
 }

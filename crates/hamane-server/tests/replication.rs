@@ -93,7 +93,10 @@ async fn state_manifest_and_segment_match_disk() {
         let (status, body) =
             get_raw(&app, &format!("/replication/segment/0/{seg_id}/{file}")).await;
         assert_eq!(status, StatusCode::OK, "{file}");
-        assert_eq!(body, std::fs::read(col_dir.join(&seg_name).join(file)).unwrap());
+        assert_eq!(
+            body,
+            std::fs::read(col_dir.join(&seg_name).join(file)).unwrap()
+        );
     }
 }
 
@@ -116,7 +119,11 @@ async fn wal_tail_reads_by_offset() {
     assert_eq!(body, on_disk[10..]);
     let (_, body) = get_raw(&app, &format!("/replication/wal/{seq}?offset={len}")).await;
     assert!(body.is_empty());
-    let (status, body) = get_raw(&app, &format!("/replication/wal/{seq}?offset={}", len + 100)).await;
+    let (status, body) = get_raw(
+        &app,
+        &format!("/replication/wal/{seq}?offset={}", len + 100),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.is_empty());
 }

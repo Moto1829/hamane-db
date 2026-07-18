@@ -24,6 +24,9 @@ pub enum HamaneError {
     #[error("database is locked by another process: {0}")]
     Locked(String),
 
+    #[error("read-only replica: writes must go to the primary")]
+    ReadOnlyReplica,
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
