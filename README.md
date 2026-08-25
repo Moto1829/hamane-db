@@ -126,3 +126,4 @@ cargo test --workspace          # 全テスト (クラッシュ耐性・プロ�
 cargo clippy --workspace --all-targets
 cargo bench -p hamane-core      # 距離カーネルのベンチ
 ```
+# phantom-ai
