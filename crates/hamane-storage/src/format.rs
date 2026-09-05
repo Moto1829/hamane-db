@@ -14,6 +14,9 @@ pub const MAGIC_TOMBSTONES: [u8; 8] = *b"HAMANET\x01";
 pub const MAGIC_MANIFEST: [u8; 8] = *b"HAMANEF\x01";
 pub const MAGIC_HNSW: [u8; 8] = *b"HAMANEH\x01";
 pub const MAGIC_SQ8: [u8; 8] = *b"HAMANEQ\x01";
+pub const MAGIC_PQ: [u8; 8] = *b"HAMANEP\x01"; // 直積量子化 (todo 1003)
+pub const MAGIC_IVF: [u8; 8] = *b"HAMANEC\x01"; // IVF 転置ファイル / 粗量子化 (todo 1004)
+pub const MAGIC_IVFPQ: [u8; 8] = *b"HAMANEG\x01"; // IVF-PQ 残差量子化 (todo 1005)
 
 pub fn corrupted(msg: impl Into<String>) -> HamaneError {
     HamaneError::Corrupted(msg.into())

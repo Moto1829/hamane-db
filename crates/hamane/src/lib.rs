@@ -36,4 +36,4 @@ pub use hamane_core::{
     EXT_ID_META_KEY,
 };
 pub use hamane_index::HnswParams;
-pub use hamane_storage::{SegmentStats, StoreOptions, SyncPolicy};
+pub use hamane_storage::{IndexKind, Quantization, SegmentStats, StoreOptions, SyncPolicy};

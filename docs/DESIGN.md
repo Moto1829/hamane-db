@@ -152,10 +152,16 @@ trait VectorIndex {
 - 選択率が低い(強く絞られる)場合: 先にメタデータで ID 集合を作り Flat で検索 (pre-filter)
 - 閾値による自動切り替えをクエリプランナに持たせる
 
-### 将来拡張(v0 では対象外)
+### 量子化とクラスタリング索引
 
-- スカラー量子化 (SQ8) / 直積量子化 (PQ) によるメモリ削減
-- IVF 系インデックス
+- スカラー量子化 (SQ8): 実装済み (M6)。詳細は docs/design/index.md §1
+- 直積量子化 (PQ) / 転置ファイル (IVF) / IVF-PQ: M10 で追加。
+  詳細は [design/quantization.md](design/quantization.md)。全て opt-in で
+  フォーマット互換を保つ
+
+### 将来拡張(未対象)
+
+- OPQ (回転付き PQ)、4/6-bit PQ サブコード
 
 ---
 
@@ -242,6 +248,8 @@ Cargo workspace で分割する:
 | M2 | 永続化(WAL + セグメント + manifest) | クラッシュ耐性テスト green |
 | M3 | HNSW(構築・永続化・マージ検索) | SIFT1M で recall@10 ≥ 0.95 |
 | M4 | コンパクション + ベンチ整備 + CLI | 長時間書き込みでディスクが収束する |
+| M5〜M9 | 性能・機能拡張・運用・レプリケーション | todos/README.md 参照 (完了) |
+| M10 | 量子化とクラスタリング索引 (PQ / IVF / IVF-PQ) | **達成** (各構成で recall@10 ≥ 0.95、docs/benchmarks.md に実測。SQ8 は recall 同等で QPS 2x) |
 
 ---
 

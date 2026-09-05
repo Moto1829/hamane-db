@@ -9,19 +9,26 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use hamane_core::{Id, Metadata, Metric, Result};
+use hamane_core::pq::{self, PqCodebook};
+use hamane_core::{dot_scalar, l2_squared_scalar, Id, Metadata, Metric, Result};
 use hamane_index::{HnswBuilder, HnswGraph, HnswParams, HnswView, VectorSource};
 use memmap2::Mmap;
 
 use crate::format::{
-    self, corrupted, put_metadata, read_metadata, Reader, MAGIC_HNSW, MAGIC_IDS, MAGIC_META,
-    MAGIC_SQ8, MAGIC_TOMBSTONES, MAGIC_VECTORS,
+    self, corrupted, put_metadata, read_metadata, Reader, MAGIC_HNSW, MAGIC_IDS, MAGIC_IVF,
+    MAGIC_IVFPQ, MAGIC_META, MAGIC_PQ, MAGIC_SQ8, MAGIC_TOMBSTONES, MAGIC_VECTORS,
 };
 use crate::memtable::MemtableSnapshot;
 
 const VECTORS_HEADER_LEN: usize = 64; // magic[8] + dim u32 + count u64 + pad
 const PLAIN_HEADER_LEN: usize = 16; // magic[8] + count u64
 const SQ8_HEADER_LEN: usize = 64; // magic[8] + dim u32 + count u64 + min f32 + max f32 + pad
+const PQ_HEADER_LEN: usize = 64; // magic[8] + dim u32 + count u64 + m u32 + nbits u8 + ksub u32 + pad
+const IVF_HEADER_LEN: usize = 64; // magic[8] + dim u32 + count u64 + nlist u32 + pad
+const IVFPQ_HEADER_LEN: usize = 64; // magic[8] + dim u32 + count u64 + nlist u32 + m u32 + nbits u8 + ksub u32 + pad
+
+/// IVF 粗量子化の目安点数/クラスタ (これ未満なら nlist を縮小する)。
+const IVF_MIN_PER_LIST: usize = 39;
 
 pub const FILE_VECTORS: &str = "vectors.bin";
 pub const FILE_IDS: &str = "ids.bin";
@@ -29,17 +36,53 @@ pub const FILE_META: &str = "meta.bin";
 pub const FILE_TOMBSTONES: &str = "tombstones.bin";
 pub const FILE_HNSW: &str = "hnsw.bin";
 pub const FILE_SQ8: &str = "vectors_sq8.bin";
+pub const FILE_PQ: &str = "vectors_pq.bin";
+pub const FILE_IVF: &str = "ivf.bin";
+pub const FILE_IVFPQ: &str = "ivfpq.bin";
+
+/// フラッシュ時の量子化方式 (docs/design/quantization.md §5)。
+/// HNSW 探索の 1 段目を量子化距離で行い、f32 で再ランクして精度を保つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quantization {
+    /// スカラー量子化 (todo 602)。ベクトルを 1/4 に圧縮
+    Sq8,
+    /// 直積量子化 (todo 1003)。`m` サブベクトルに分割。`None` は dim から自動決定
+    Pq { m: Option<usize> },
+}
+
+/// セグメントに構築する主索引の種類 (docs/design/quantization.md §2.2)。
+/// HNSW と IVF はどちらも枝刈り機構なのでセグメント単位で排他。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IndexKind {
+    /// HNSW グラフ (既定)。量子化と組み合わせ可能
+    #[default]
+    Hnsw,
+    /// IVF 転置ファイル (todo 1004)。nprobe クラスタだけを Flat 走査
+    Ivf,
+    /// IVF-PQ (todo 1005)。IVF の枝刈り + 残差 PQ 圧縮。quantization=Pq が必須
+    IvfPq,
+}
 
 /// フラッシュ時のインデックス構築指定 (docs/design/index.md §4)。
 #[derive(Debug, Clone, Copy)]
 pub struct IndexBuildSpec {
     pub metric: Metric,
     pub params: HnswParams,
-    /// この行数未満のセグメントは HNSW を作らない (Flat で十分)
+    /// この行数未満のセグメントは索引を作らない (Flat で十分)
     pub min_rows: usize,
-    /// SQ8 量子化ベクトル (vectors_sq8.bin) も書く (todo 602)。
-    /// HNSW 探索の距離計算が u8 になり、f32 再ランクと組み合わせて使う
-    pub sq8: bool,
+    /// 主索引の種類 (HNSW / IVF)
+    pub index: IndexKind,
+    /// 量子化ベクトルも書く (None = f32 のみ)。HNSW 探索の距離計算を量子化し、
+    /// f32 再ランクと組み合わせて使う (docs/design/quantization.md)
+    pub quantization: Option<Quantization>,
+}
+
+/// count 件のセグメントに対する IVF のクラスタ数を決める。
+/// `sqrt(count)` を基本に [16, 65536] にクランプし、
+/// 点数/クラスタが目安を下回るなら縮小する。
+fn choose_nlist(count: usize) -> usize {
+    let base = (count as f64).sqrt().round() as usize;
+    base.clamp(16, 65536).min(count / IVF_MIN_PER_LIST).max(1)
 }
 
 /// 行ベクトル列の VectorSource アダプタ (フラッシュ時の HNSW 構築用)。
@@ -171,31 +214,22 @@ impl SegmentWriter {
         }
         write_file_with_crc(&tmp_dir.join(FILE_TOMBSTONES), &buf)?;
 
-        // hnsw.bin (任意)
+        // 主索引 (任意)。HNSW か IVF のどちらか一方 (排他)
         if let Some(spec) = index {
             if rows.len() >= spec.min_rows && !rows.is_empty() {
-                let source = RowsSource(rows.iter().map(|(_, v, _)| *v).collect());
-                let params = HnswParams {
-                    seed: seg_id,
-                    ..spec.params
-                };
-                let builder = HnswBuilder::build(&source, spec.metric, params);
-                write_file_with_crc(&tmp_dir.join(FILE_HNSW), &builder.serialize())?;
-
-                // vectors_sq8.bin (任意、todo 602): グローバル min/max で u8 量子化
-                if spec.sq8 {
-                    let params = hamane_core::sq8::Sq8Params::fit(rows.iter().map(|(_, v, _)| *v));
-                    let mut buf = Vec::with_capacity(SQ8_HEADER_LEN + rows.len() * dim as usize);
-                    buf.extend_from_slice(&MAGIC_SQ8);
-                    format::put_u32(&mut buf, dim);
-                    format::put_u64(&mut buf, count);
-                    buf.extend_from_slice(&params.min.to_le_bytes());
-                    buf.extend_from_slice(&params.max.to_le_bytes());
-                    buf.resize(SQ8_HEADER_LEN, 0);
-                    for (_, vector, _) in &rows {
-                        params.quantize(vector, &mut buf);
+                match spec.index {
+                    IndexKind::Hnsw => {
+                        Self::write_hnsw(&tmp_dir, seg_id, &spec, &rows, dim, count)?
                     }
-                    write_file_with_crc(&tmp_dir.join(FILE_SQ8), &buf)?;
+                    IndexKind::Ivf => Self::write_ivf(&tmp_dir, seg_id, &rows, dim, count)?,
+                    IndexKind::IvfPq => {
+                        // 残差 PQ の m は quantization=Pq{m} から取る (validate で保証)
+                        let m = match spec.quantization {
+                            Some(Quantization::Pq { m }) => m,
+                            _ => None,
+                        };
+                        Self::write_ivfpq(&tmp_dir, seg_id, m, &rows, dim, count)?
+                    }
                 }
             }
         }
@@ -209,6 +243,229 @@ impl SegmentWriter {
             record_count: count,
             tombstone_count: tombstones.len() as u64,
         })
+    }
+
+    /// hnsw.bin (+ 任意の量子化ベクトル) を書く。
+    fn write_hnsw(
+        tmp_dir: &Path,
+        seg_id: u64,
+        spec: &IndexBuildSpec,
+        rows: &[(Id, &[f32], &Metadata)],
+        dim: u32,
+        count: u64,
+    ) -> Result<()> {
+        let source = RowsSource(rows.iter().map(|(_, v, _)| *v).collect());
+        let params = HnswParams {
+            seed: seg_id,
+            ..spec.params
+        };
+        let builder = HnswBuilder::build(&source, spec.metric, params);
+        write_file_with_crc(&tmp_dir.join(FILE_HNSW), &builder.serialize())?;
+
+        // 量子化ベクトル (任意)。HNSW 探索の 1 段目に使い f32 で再ランクする
+        match spec.quantization {
+            // vectors_sq8.bin (todo 602): グローバル min/max で u8 量子化
+            Some(Quantization::Sq8) => {
+                let params = hamane_core::sq8::Sq8Params::fit(rows.iter().map(|(_, v, _)| *v));
+                let mut buf = Vec::with_capacity(SQ8_HEADER_LEN + rows.len() * dim as usize);
+                buf.extend_from_slice(&MAGIC_SQ8);
+                format::put_u32(&mut buf, dim);
+                format::put_u64(&mut buf, count);
+                buf.extend_from_slice(&params.min.to_le_bytes());
+                buf.extend_from_slice(&params.max.to_le_bytes());
+                buf.resize(SQ8_HEADER_LEN, 0);
+                for (_, vector, _) in rows {
+                    params.quantize(vector, &mut buf);
+                }
+                write_file_with_crc(&tmp_dir.join(FILE_SQ8), &buf)?;
+            }
+            // vectors_pq.bin (todo 1003): サブベクトルごとのコードブック
+            Some(Quantization::Pq { m }) => {
+                // 明示 m が dim を割り切らなければ自動決定にフォールバック。自動決定も
+                // 不可 (素数次元など) なら PQ をスキップして通常 HNSW にフォールバック
+                // する (フラッシュを絶対に失敗させない。docs/design/quantization.md §4)
+                let m = m
+                    .filter(|&m| m > 0 && (dim as usize).is_multiple_of(m))
+                    .or_else(|| pq::choose_m(dim as usize));
+                if let Some(m) = m {
+                    let vecs: Vec<&[f32]> = rows.iter().map(|(_, v, _)| *v).collect();
+                    // seed はセグメント ID で決定的に (HNSW と同様)
+                    let codebook = PqCodebook::train(
+                        &vecs,
+                        dim as usize,
+                        m,
+                        seg_id,
+                        pq::DEFAULT_TRAIN_SAMPLE,
+                        pq::DEFAULT_MAX_ITER,
+                    )?;
+                    let cb = codebook.centroids();
+                    let mut buf = Vec::with_capacity(PQ_HEADER_LEN + cb.len() * 4 + rows.len() * m);
+                    buf.extend_from_slice(&MAGIC_PQ);
+                    format::put_u32(&mut buf, dim);
+                    format::put_u64(&mut buf, count);
+                    format::put_u32(&mut buf, m as u32);
+                    buf.push(pq::NBITS);
+                    format::put_u32(&mut buf, pq::KSUB as u32);
+                    buf.resize(PQ_HEADER_LEN, 0);
+                    format::put_f32_slice(&mut buf, cb);
+                    for (_, vector, _) in rows {
+                        codebook.encode(vector, &mut buf);
+                    }
+                    write_file_with_crc(&tmp_dir.join(FILE_PQ), &buf)?;
+                }
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
+    /// ivf.bin (粗セントロイド + CSR 転置リスト) を書く (todo 1004)。
+    fn write_ivf(
+        tmp_dir: &Path,
+        seg_id: u64,
+        rows: &[(Id, &[f32], &Metadata)],
+        dim: u32,
+        count: u64,
+    ) -> Result<()> {
+        let d = dim as usize;
+        let vecs: Vec<&[f32]> = rows.iter().map(|(_, v, _)| *v).collect();
+        let nlist = choose_nlist(rows.len());
+        // サンプルで粗 k-means を学習し、全行を最近セントロイドに割り当てる
+        let sample = pq::subsample(&vecs, pq::DEFAULT_TRAIN_SAMPLE);
+        let centroids = pq::kmeans(&sample, d, nlist, seg_id, pq::DEFAULT_MAX_ITER);
+        let mut lists: Vec<Vec<u32>> = vec![Vec::new(); nlist];
+        for (row, v) in vecs.iter().enumerate() {
+            let l = pq::nearest(v, &centroids, d, nlist) as usize;
+            lists[l].push(row as u32); // row 昇順に push = list 内 entries 昇順
+        }
+
+        let mut buf = Vec::with_capacity(
+            IVF_HEADER_LEN + centroids.len() * 4 + (nlist + 1) * 8 + rows.len() * 4,
+        );
+        buf.extend_from_slice(&MAGIC_IVF);
+        format::put_u32(&mut buf, dim);
+        format::put_u64(&mut buf, count);
+        format::put_u32(&mut buf, nlist as u32);
+        buf.resize(IVF_HEADER_LEN, 0);
+        format::put_f32_slice(&mut buf, &centroids);
+        // CSR: offsets (prefix sum) → entries
+        let mut offset = 0u64;
+        format::put_u64(&mut buf, offset);
+        for list in &lists {
+            offset += list.len() as u64;
+            format::put_u64(&mut buf, offset);
+        }
+        for list in &lists {
+            for &row in list {
+                format::put_u32(&mut buf, row);
+            }
+        }
+        write_file_with_crc(&tmp_dir.join(FILE_IVF), &buf)?;
+        Ok(())
+    }
+
+    /// ivfpq.bin (粗セントロイド + 残差 PQ コードブック + CSR(entries+codes)) を
+    /// 書く (todo 1005)。各行を所属クラスタの粗セントロイドを引いた残差として
+    /// PQ 符号化する (IVFADC)。m が解決できなければ通常 IVF にフォールバック。
+    fn write_ivfpq(
+        tmp_dir: &Path,
+        seg_id: u64,
+        m: Option<usize>,
+        rows: &[(Id, &[f32], &Metadata)],
+        dim: u32,
+        count: u64,
+    ) -> Result<()> {
+        let d = dim as usize;
+        // 明示 m が dim を割り切らなければ自動決定。不可なら通常 IVF にフォールバック
+        let m = match m
+            .filter(|&m| m > 0 && d.is_multiple_of(m))
+            .or_else(|| pq::choose_m(d))
+        {
+            Some(m) => m,
+            None => return Self::write_ivf(tmp_dir, seg_id, rows, dim, count),
+        };
+
+        let vecs: Vec<&[f32]> = rows.iter().map(|(_, v, _)| *v).collect();
+        let nlist = choose_nlist(rows.len());
+        // 粗 k-means → 各行の所属リスト
+        let sample = pq::subsample(&vecs, pq::DEFAULT_TRAIN_SAMPLE);
+        let centroids = pq::kmeans(&sample, d, nlist, seg_id, pq::DEFAULT_MAX_ITER);
+        let assign: Vec<u32> = vecs
+            .iter()
+            .map(|v| pq::nearest(v, &centroids, d, nlist))
+            .collect();
+        // 残差 r = x − centroid[list]
+        let residuals: Vec<Vec<f32>> = vecs
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let c = &centroids[assign[i] as usize * d..(assign[i] as usize + 1) * d];
+                v.iter().zip(c).map(|(x, cc)| x - cc).collect()
+            })
+            .collect();
+        // 残差空間で PQ コードブックを 1 組学習 (リスト非依存の共有コードブック)
+        let res_slices: Vec<&[f32]> = residuals.iter().map(|r| r.as_slice()).collect();
+        let codebook = PqCodebook::train(
+            &res_slices,
+            d,
+            m,
+            seg_id ^ 0xF1F1_F1F1,
+            pq::DEFAULT_TRAIN_SAMPLE,
+            pq::DEFAULT_MAX_ITER,
+        )?;
+        // 残差 PQ コード (行順)
+        let codes: Vec<Vec<u8>> = residuals
+            .iter()
+            .map(|r| {
+                let mut c = Vec::with_capacity(m);
+                codebook.encode(r, &mut c);
+                c
+            })
+            .collect();
+        // リストごとに行を集める (row 昇順 = entries 昇順)
+        let mut lists: Vec<Vec<u32>> = vec![Vec::new(); nlist];
+        for (row, &l) in assign.iter().enumerate() {
+            lists[l as usize].push(row as u32);
+        }
+
+        let cb = codebook.centroids();
+        let mut buf = Vec::with_capacity(
+            IVFPQ_HEADER_LEN
+                + centroids.len() * 4
+                + cb.len() * 4
+                + (nlist + 1) * 8
+                + rows.len() * 4
+                + rows.len() * m,
+        );
+        buf.extend_from_slice(&MAGIC_IVFPQ);
+        format::put_u32(&mut buf, dim);
+        format::put_u64(&mut buf, count);
+        format::put_u32(&mut buf, nlist as u32);
+        format::put_u32(&mut buf, m as u32);
+        buf.push(pq::NBITS);
+        format::put_u32(&mut buf, pq::KSUB as u32);
+        buf.resize(IVFPQ_HEADER_LEN, 0);
+        format::put_f32_slice(&mut buf, &centroids);
+        format::put_f32_slice(&mut buf, cb);
+        // CSR: offsets → entries → codes (entries と同順)
+        let mut offset = 0u64;
+        format::put_u64(&mut buf, offset);
+        for list in &lists {
+            offset += list.len() as u64;
+            format::put_u64(&mut buf, offset);
+        }
+        for list in &lists {
+            for &row in list {
+                format::put_u32(&mut buf, row);
+            }
+        }
+        for list in &lists {
+            for &row in list {
+                buf.extend_from_slice(&codes[row as usize]);
+            }
+        }
+        write_file_with_crc(&tmp_dir.join(FILE_IVFPQ), &buf)?;
+        Ok(())
     }
 }
 
@@ -268,6 +525,342 @@ pub struct Segment {
     hnsw: Option<MappedFile>,
     /// vectors_sq8.bin (存在する場合のみ、todo 602)
     sq8: Option<MappedFile>,
+    /// vectors_pq.bin (存在する場合のみ、todo 1003)。コードブックは open 時に
+    /// 一度だけ復元し (~MB)、コード列は mmap のまま (zero-copy)
+    pq: Option<PqSegment>,
+    /// ivf.bin (存在する場合のみ、todo 1004)。粗セントロイドは open 時に復元し、
+    /// CSR (offsets/entries) は mmap のまま (zero-copy)。HNSW とは排他
+    ivf: Option<IvfSegment>,
+    /// ivfpq.bin (存在する場合のみ、todo 1005)。粗セントロイド + 残差 PQ
+    /// コードブックは open 時に復元、CSR (offsets/entries/codes) は mmap のまま
+    ivfpq: Option<IvfPqSegment>,
+}
+
+/// IVF-PQ の保持物。粗セントロイドと残差 PQ コードブックは owned、
+/// CSR (offsets/entries/codes) は `mapped` を参照する。
+struct IvfPqSegment {
+    centroids: Vec<f32>, // nlist × dim
+    codebook: PqCodebook,
+    dim: usize,
+    nlist: usize,
+    mapped: MappedFile,
+    offsets_start: usize, // (nlist+1) × u64
+    entries_start: usize, // count × u32
+    codes_start: usize,   // count × m × u8
+}
+
+/// IVF-PQ へのビュー。probe リスト選択と、リストごとの残差 ADC を担う。
+pub struct IvfPqView<'a> {
+    centroids: &'a [f32],
+    codebook: &'a PqCodebook,
+    dim: usize,
+    nlist: usize,
+    offsets: &'a [u8], // (nlist+1) × u64
+    entries: &'a [u8], // count × u32
+    codes: &'a [u8],   // count × m × u8
+}
+
+impl IvfPqView<'_> {
+    #[inline]
+    fn offset(&self, i: usize) -> usize {
+        u64::from_le_bytes(self.offsets[i * 8..i * 8 + 8].try_into().unwrap()) as usize
+    }
+
+    /// CSR インデックス i (entries/codes は同順) の行番号。
+    #[inline]
+    pub fn entry(&self, i: usize) -> u32 {
+        u32::from_le_bytes(self.entries[i * 4..i * 4 + 4].try_into().unwrap())
+    }
+
+    /// リスト l の CSR インデックス範囲 (entry/code_distance に渡す)。
+    #[inline]
+    pub fn list_range(&self, l: usize) -> std::ops::Range<usize> {
+        self.offset(l)..self.offset(l + 1)
+    }
+
+    /// 粗セントロイド l。
+    #[inline]
+    fn centroid(&self, l: usize) -> &[f32] {
+        &self.centroids[l * self.dim..(l + 1) * self.dim]
+    }
+
+    /// クエリに近い nprobe 個のリスト ID を返す (粗量子化は L2 選択)。
+    pub fn nprobe_lists(&self, query: &[f32], nprobe: usize) -> Vec<usize> {
+        let mut dists: Vec<(f32, usize)> = (0..self.nlist)
+            .map(|l| (l2_squared_scalar(query, self.centroid(l)), l))
+            .collect();
+        let take = nprobe.clamp(1, self.nlist);
+        dists.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("distances are finite"));
+        dists.iter().take(take).map(|&(_, l)| l).collect()
+    }
+
+    /// リスト l 用の残差 ADC の (LUT, バイアス) を返す。
+    /// `distance_key = bias + Σ_j lut[code[j]]` が「小さいほど近い」推定になる。
+    ///
+    /// - L2: `||q − x||² = ||(q − centroid) − r||²`。クエリ残差で LUT、bias=0
+    /// - Dot/Cosine: `dot(q, x) = dot(q, centroid) + dot(q, r)`。LUT は生クエリ、
+    ///   bias = −dot(q, centroid[l])
+    pub fn build_list_lut(&self, query: &[f32], l: usize, metric: Metric) -> (Vec<f32>, f32) {
+        let c = self.centroid(l);
+        match metric {
+            Metric::L2 => {
+                let residual: Vec<f32> = query.iter().zip(c).map(|(q, cc)| q - cc).collect();
+                (self.codebook.build_lut(&residual, metric), 0.0)
+            }
+            Metric::Cosine | Metric::Dot => {
+                let lut = self.codebook.build_lut(query, metric);
+                (lut, -dot_scalar(query, c))
+            }
+        }
+    }
+
+    /// CSR インデックス i の残差 ADC 距離キー (bias は呼び出し側で加算)。
+    #[inline]
+    pub fn code_distance(&self, lut: &[f32], i: usize) -> f32 {
+        let m = self.codebook.m();
+        let code = &self.codes[i * m..i * m + m];
+        self.codebook.distance_key(lut, code)
+    }
+}
+
+/// IVF 転置ファイルの保持物。粗セントロイドは owned、CSR は `mapped` を参照する。
+struct IvfSegment {
+    centroids: Vec<f32>, // nlist × dim
+    dim: usize,
+    nlist: usize,
+    mapped: MappedFile,
+    /// content 内の offsets 配列開始 (`(nlist+1) × u64`)
+    offsets_start: usize,
+    /// content 内の entries 配列開始 (`count × u32`)
+    entries_start: usize,
+}
+
+/// IVF 転置ファイルへのビュー。nprobe クラスタの候補行を返す。
+pub struct IvfView<'a> {
+    centroids: &'a [f32],
+    dim: usize,
+    nlist: usize,
+    offsets: &'a [u8], // (nlist+1) × u64
+    entries: &'a [u8], // count × u32
+}
+
+impl IvfView<'_> {
+    #[inline]
+    fn offset(&self, i: usize) -> usize {
+        u64::from_le_bytes(self.offsets[i * 8..i * 8 + 8].try_into().unwrap()) as usize
+    }
+
+    #[inline]
+    fn entry(&self, i: usize) -> u32 {
+        u32::from_le_bytes(self.entries[i * 4..i * 4 + 4].try_into().unwrap())
+    }
+
+    /// クエリに近い `nprobe` 個のリストの全行番号を返す (粗量子化は L2 選択)。
+    /// nlist は sqrt(count) オーダなので全セントロイド計算 + ソートで十分安価。
+    pub fn candidate_rows(&self, query: &[f32], nprobe: usize) -> Vec<u32> {
+        let mut dists: Vec<(f32, usize)> = (0..self.nlist)
+            .map(|l| {
+                let c = &self.centroids[l * self.dim..(l + 1) * self.dim];
+                (l2_squared_scalar(query, c), l)
+            })
+            .collect();
+        let take = nprobe.clamp(1, self.nlist);
+        dists.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("distances are finite"));
+        let mut rows = Vec::new();
+        for &(_, l) in dists.iter().take(take) {
+            for i in self.offset(l)..self.offset(l + 1) {
+                rows.push(self.entry(i));
+            }
+        }
+        rows
+    }
+}
+
+/// PQ 量子化セグメントの保持物。コードブックは owned (mmap 生存期間から独立、
+/// 検索ごとの再構築を避ける)、コード列は `mapped` の mmap を参照する。
+struct PqSegment {
+    codebook: PqCodebook,
+    mapped: MappedFile,
+    /// content 内のコード列開始オフセット (`count × m` バイトが続く)
+    codes_start: usize,
+}
+
+/// PQ 量子化ベクトルへの zero-copy ビュー。ADC (LUT) で距離を推定する。
+pub struct PqView<'a> {
+    codebook: &'a PqCodebook,
+    codes: &'a [u8],
+}
+
+impl PqView<'_> {
+    /// クエリと全セントロイドの距離表 (LUT) を作る。検索の開始時に 1 回。
+    pub fn build_lut(&self, query: &[f32], metric: Metric) -> Vec<f32> {
+        self.codebook.build_lut(query, metric)
+    }
+
+    /// 行 row のコード。
+    #[inline]
+    fn code(&self, row: u32) -> &[u8] {
+        let m = self.codebook.m();
+        let start = row as usize * m;
+        &self.codes[start..start + m]
+    }
+
+    /// LUT と行 row から「小さいほど近い」距離キーを推定する (表引き加算)。
+    #[inline]
+    pub fn distance_key(&self, lut: &[f32], row: u32) -> f32 {
+        self.codebook.distance_key(lut, self.code(row))
+    }
+}
+
+/// vectors_pq.bin を mmap で開き、ヘッダ検証とコードブック復元を行う。
+fn load_pq(path: &Path, seg_dim: usize, seg_count: usize) -> Result<PqSegment> {
+    let mapped = MappedFile::open(path, &MAGIC_PQ)?;
+    let content = mapped.content();
+    if content.len() < PQ_HEADER_LEN {
+        return Err(corrupted("pq header too short"));
+    }
+    let dim = u32::from_le_bytes(content[8..12].try_into().unwrap()) as usize;
+    let count = u64::from_le_bytes(content[12..20].try_into().unwrap()) as usize;
+    let m = u32::from_le_bytes(content[20..24].try_into().unwrap()) as usize;
+    let nbits = content[24];
+    let ksub = u32::from_le_bytes(content[25..29].try_into().unwrap()) as usize;
+    if dim != seg_dim || count != seg_count {
+        return Err(corrupted("pq dim/count mismatch with segment"));
+    }
+    if nbits != pq::NBITS || ksub != pq::KSUB {
+        return Err(corrupted("pq unsupported nbits/ksub"));
+    }
+    if m == 0 || !dim.is_multiple_of(m) {
+        return Err(corrupted("pq invalid m"));
+    }
+    let dsub = dim / m;
+    let cb_bytes = m * ksub * dsub * 4;
+    let codes_start = PQ_HEADER_LEN + cb_bytes;
+    if content.len() != codes_start + count * m {
+        return Err(corrupted("pq data size mismatch"));
+    }
+    // コードブック (f32) を復元
+    let mut centroids = Vec::with_capacity(m * ksub * dsub);
+    for chunk in content[PQ_HEADER_LEN..codes_start].chunks_exact(4) {
+        centroids.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+    }
+    let codebook = PqCodebook::from_centroids(m, dsub, centroids)?;
+    Ok(PqSegment {
+        codebook,
+        mapped,
+        codes_start,
+    })
+}
+
+/// ivf.bin を mmap で開き、ヘッダ検証と粗セントロイド復元を行う。
+fn load_ivf(path: &Path, seg_dim: usize, seg_count: usize) -> Result<IvfSegment> {
+    let mapped = MappedFile::open(path, &MAGIC_IVF)?;
+    let content = mapped.content();
+    if content.len() < IVF_HEADER_LEN {
+        return Err(corrupted("ivf header too short"));
+    }
+    let dim = u32::from_le_bytes(content[8..12].try_into().unwrap()) as usize;
+    let count = u64::from_le_bytes(content[12..20].try_into().unwrap()) as usize;
+    let nlist = u32::from_le_bytes(content[20..24].try_into().unwrap()) as usize;
+    if dim != seg_dim || count != seg_count {
+        return Err(corrupted("ivf dim/count mismatch with segment"));
+    }
+    if nlist == 0 {
+        return Err(corrupted("ivf nlist is zero"));
+    }
+    let offsets_start = IVF_HEADER_LEN + nlist * dim * 4;
+    let entries_start = offsets_start + (nlist + 1) * 8;
+    if content.len() != entries_start + count * 4 {
+        return Err(corrupted("ivf data size mismatch"));
+    }
+    // 粗セントロイドを復元
+    let mut centroids = Vec::with_capacity(nlist * dim);
+    for chunk in content[IVF_HEADER_LEN..offsets_start].chunks_exact(4) {
+        centroids.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+    }
+    // 転置リストの末尾オフセットが総行数に一致することを確認 (CSR 整合)
+    let last = u64::from_le_bytes(
+        content[entries_start - 8..entries_start]
+            .try_into()
+            .unwrap(),
+    );
+    if last as usize != count {
+        return Err(corrupted("ivf offsets do not sum to count"));
+    }
+    Ok(IvfSegment {
+        centroids,
+        dim,
+        nlist,
+        mapped,
+        offsets_start,
+        entries_start,
+    })
+}
+
+/// ivfpq.bin を mmap で開き、ヘッダ検証・粗セントロイド・残差 PQ コードブックの
+/// 復元を行う。
+fn load_ivfpq(path: &Path, seg_dim: usize, seg_count: usize) -> Result<IvfPqSegment> {
+    let mapped = MappedFile::open(path, &MAGIC_IVFPQ)?;
+    let content = mapped.content();
+    if content.len() < IVFPQ_HEADER_LEN {
+        return Err(corrupted("ivfpq header too short"));
+    }
+    let dim = u32::from_le_bytes(content[8..12].try_into().unwrap()) as usize;
+    let count = u64::from_le_bytes(content[12..20].try_into().unwrap()) as usize;
+    let nlist = u32::from_le_bytes(content[20..24].try_into().unwrap()) as usize;
+    let m = u32::from_le_bytes(content[24..28].try_into().unwrap()) as usize;
+    let nbits = content[28];
+    let ksub = u32::from_le_bytes(content[29..33].try_into().unwrap()) as usize;
+    if dim != seg_dim || count != seg_count {
+        return Err(corrupted("ivfpq dim/count mismatch with segment"));
+    }
+    if nlist == 0 {
+        return Err(corrupted("ivfpq nlist is zero"));
+    }
+    if nbits != pq::NBITS || ksub != pq::KSUB {
+        return Err(corrupted("ivfpq unsupported nbits/ksub"));
+    }
+    if m == 0 || !dim.is_multiple_of(m) {
+        return Err(corrupted("ivfpq invalid m"));
+    }
+    let dsub = dim / m;
+    let coarse_start = IVFPQ_HEADER_LEN;
+    let cb_start = coarse_start + nlist * dim * 4;
+    let offsets_start = cb_start + m * ksub * dsub * 4;
+    let entries_start = offsets_start + (nlist + 1) * 8;
+    let codes_start = entries_start + count * 4;
+    if content.len() != codes_start + count * m {
+        return Err(corrupted("ivfpq data size mismatch"));
+    }
+    // 粗セントロイドと残差 PQ コードブックを復元
+    let mut centroids = Vec::with_capacity(nlist * dim);
+    for chunk in content[coarse_start..cb_start].chunks_exact(4) {
+        centroids.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+    }
+    let mut cb = Vec::with_capacity(m * ksub * dsub);
+    for chunk in content[cb_start..offsets_start].chunks_exact(4) {
+        cb.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+    }
+    let codebook = PqCodebook::from_centroids(m, dsub, cb)?;
+    // CSR 末尾オフセットが総行数に一致することを確認
+    let last = u64::from_le_bytes(
+        content[entries_start - 8..entries_start]
+            .try_into()
+            .unwrap(),
+    );
+    if last as usize != count {
+        return Err(corrupted("ivfpq offsets do not sum to count"));
+    }
+    Ok(IvfPqSegment {
+        centroids,
+        codebook,
+        dim,
+        nlist,
+        mapped,
+        offsets_start,
+        entries_start,
+        codes_start,
+    })
 }
 
 /// SQ8 量子化ベクトルへの zero-copy ビュー。
@@ -368,6 +961,27 @@ impl Segment {
         let dim = u32::from_le_bytes(vectors.content()[8..12].try_into().unwrap()) as usize;
         let count = vectors.u64_at(12)? as usize;
 
+        // vectors_pq.bin (任意): コードブックを復元して保持する
+        let pq = if dir.join(FILE_PQ).exists() {
+            Some(load_pq(&dir.join(FILE_PQ), dim, count)?)
+        } else {
+            None
+        };
+
+        // ivf.bin (任意): 粗セントロイドを復元して保持する
+        let ivf = if dir.join(FILE_IVF).exists() {
+            Some(load_ivf(&dir.join(FILE_IVF), dim, count)?)
+        } else {
+            None
+        };
+
+        // ivfpq.bin (任意): 粗セントロイド + 残差 PQ コードブックを復元
+        let ivfpq = if dir.join(FILE_IVFPQ).exists() {
+            Some(load_ivfpq(&dir.join(FILE_IVFPQ), dim, count)?)
+        } else {
+            None
+        };
+
         // 各ファイルの count・サイズ整合
         if ids.u64_at(8)? as usize != count || meta.u64_at(8)? as usize != count {
             return Err(corrupted("count mismatch across segment files"));
@@ -405,8 +1019,12 @@ impl Segment {
             tombstones,
             hnsw,
             sq8,
+            pq,
+            ivf,
+            ivfpq,
         };
-        // hnsw.bin / vectors_sq8.bin があれば構造を一度検証しておく (行数の整合含む)
+        // hnsw.bin / vectors_sq8.bin があれば構造を一度検証しておく (行数の整合含む)。
+        // vectors_pq.bin は load_pq 内で検証済み
         if segment.hnsw.is_some() {
             segment.hnsw()?;
         }
@@ -414,6 +1032,60 @@ impl Segment {
             segment.sq8_view()?;
         }
         Ok(segment)
+    }
+
+    /// PQ 量子化ベクトルのビューを返す (vectors_pq.bin がなければ None)。
+    /// コードブックは open 時に検証・復元済みなので軽量。
+    pub fn pq_view(&self) -> Option<PqView<'_>> {
+        let pq = self.pq.as_ref()?;
+        Some(PqView {
+            codebook: &pq.codebook,
+            codes: &pq.mapped.content()[pq.codes_start..],
+        })
+    }
+
+    /// このセグメントが PQ 量子化ベクトルを持つか。
+    pub fn has_pq(&self) -> bool {
+        self.pq.is_some()
+    }
+
+    /// IVF 転置ファイルのビューを返す (ivf.bin がなければ None)。
+    /// 粗セントロイドは open 時に検証・復元済みなので軽量。
+    pub fn ivf_view(&self) -> Option<IvfView<'_>> {
+        let ivf = self.ivf.as_ref()?;
+        let content = ivf.mapped.content();
+        Some(IvfView {
+            centroids: &ivf.centroids,
+            dim: ivf.dim,
+            nlist: ivf.nlist,
+            offsets: &content[ivf.offsets_start..ivf.entries_start],
+            entries: &content[ivf.entries_start..],
+        })
+    }
+
+    /// このセグメントが IVF 転置ファイルを持つか。
+    pub fn has_ivf(&self) -> bool {
+        self.ivf.is_some()
+    }
+
+    /// IVF-PQ のビューを返す (ivfpq.bin がなければ None)。
+    pub fn ivfpq_view(&self) -> Option<IvfPqView<'_>> {
+        let x = self.ivfpq.as_ref()?;
+        let content = x.mapped.content();
+        Some(IvfPqView {
+            centroids: &x.centroids,
+            codebook: &x.codebook,
+            dim: x.dim,
+            nlist: x.nlist,
+            offsets: &content[x.offsets_start..x.entries_start],
+            entries: &content[x.entries_start..x.codes_start],
+            codes: &content[x.codes_start..],
+        })
+    }
+
+    /// このセグメントが IVF-PQ を持つか。
+    pub fn has_ivfpq(&self) -> bool {
+        self.ivfpq.is_some()
     }
 
     /// SQ8 量子化ベクトルのビューを返す (vectors_sq8.bin がなければ None)。
@@ -459,6 +1131,15 @@ impl Segment {
         }
         if let Some(q) = &self.sq8 {
             q.verify_checksum(FILE_SQ8)?;
+        }
+        if let Some(pq) = &self.pq {
+            pq.mapped.verify_checksum(FILE_PQ)?;
+        }
+        if let Some(ivf) = &self.ivf {
+            ivf.mapped.verify_checksum(FILE_IVF)?;
+        }
+        if let Some(x) = &self.ivfpq {
+            x.mapped.verify_checksum(FILE_IVFPQ)?;
         }
         Ok(())
     }
