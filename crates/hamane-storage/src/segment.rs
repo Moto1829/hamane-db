@@ -741,8 +741,8 @@ fn load_pq(path: &Path, seg_dim: usize, seg_count: usize) -> Result<PqSegment> {
     }
     // コードブック (f32) を復元
     let mut centroids = Vec::with_capacity(m * ksub * dsub);
-    for chunk in content[PQ_HEADER_LEN..codes_start].chunks_exact(4) {
-        centroids.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+    for chunk in content[PQ_HEADER_LEN..codes_start].as_chunks::<4>().0 {
+        centroids.push(f32::from_le_bytes(*chunk));
     }
     let codebook = PqCodebook::from_centroids(m, dsub, centroids)?;
     Ok(PqSegment {
@@ -775,8 +775,8 @@ fn load_ivf(path: &Path, seg_dim: usize, seg_count: usize) -> Result<IvfSegment>
     }
     // 粗セントロイドを復元
     let mut centroids = Vec::with_capacity(nlist * dim);
-    for chunk in content[IVF_HEADER_LEN..offsets_start].chunks_exact(4) {
-        centroids.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+    for chunk in content[IVF_HEADER_LEN..offsets_start].as_chunks::<4>().0 {
+        centroids.push(f32::from_le_bytes(*chunk));
     }
     // 転置リストの末尾オフセットが総行数に一致することを確認 (CSR 整合)
     let last = u64::from_le_bytes(
@@ -834,12 +834,12 @@ fn load_ivfpq(path: &Path, seg_dim: usize, seg_count: usize) -> Result<IvfPqSegm
     }
     // 粗セントロイドと残差 PQ コードブックを復元
     let mut centroids = Vec::with_capacity(nlist * dim);
-    for chunk in content[coarse_start..cb_start].chunks_exact(4) {
-        centroids.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+    for chunk in content[coarse_start..cb_start].as_chunks::<4>().0 {
+        centroids.push(f32::from_le_bytes(*chunk));
     }
     let mut cb = Vec::with_capacity(m * ksub * dsub);
-    for chunk in content[cb_start..offsets_start].chunks_exact(4) {
-        cb.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+    for chunk in content[cb_start..offsets_start].as_chunks::<4>().0 {
+        cb.push(f32::from_le_bytes(*chunk));
     }
     let codebook = PqCodebook::from_centroids(m, dsub, cb)?;
     // CSR 末尾オフセットが総行数に一致することを確認

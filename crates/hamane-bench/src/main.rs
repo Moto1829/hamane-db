@@ -83,8 +83,10 @@ fn read_fvecs(path: &Path, limit: usize) -> std::io::Result<Vec<Vec<f32>>> {
         let end = pos + d * 4;
         assert!(end <= buf.len(), "truncated fvecs file");
         let v: Vec<f32> = buf[pos..end]
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
         pos = end;
         out.push(v);
@@ -103,8 +105,10 @@ fn read_ivecs(path: &Path, limit: usize) -> std::io::Result<Vec<Vec<u32>>> {
         let end = pos + d * 4;
         assert!(end <= buf.len(), "truncated ivecs file");
         let v: Vec<u32> = buf[pos..end]
-            .chunks_exact(4)
-            .map(|c| i32::from_le_bytes(c.try_into().unwrap()) as u32)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| i32::from_le_bytes(*c) as u32)
             .collect();
         pos = end;
         out.push(v);

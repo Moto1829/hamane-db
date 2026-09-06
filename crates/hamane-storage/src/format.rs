@@ -115,8 +115,10 @@ impl<'a> Reader<'a> {
     pub fn f32_vec(&mut self, len: usize) -> Result<Vec<f32>> {
         let bytes = self.take(len * 4)?;
         Ok(bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect())
     }
 
