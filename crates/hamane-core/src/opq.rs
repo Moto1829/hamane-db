@@ -73,6 +73,156 @@ fn identity(d: usize) -> Vec<f32> {
     m
 }
 
+/// 対称行列の固有分解 (循環 Jacobi 法)。`(固有値, 固有ベクトル行列)` を返す。
+///
+/// 固有ベクトルは**行**方向 (`v[i * d + j]` = 第 i 固有ベクトルの第 j 成分)。
+/// 決定的で外部クレートに依存しない。d は数百までを想定 (O(d³) × 掃引回数)。
+fn jacobi_eigen(sym: &[f32], d: usize) -> (Vec<f64>, Vec<f64>) {
+    const MAX_SWEEPS: usize = 60;
+    let mut a: Vec<f64> = sym.iter().map(|&x| x as f64).collect();
+    // v は固有ベクトルを列に持つ回転の蓄積 (最後に転置して行に直す)
+    let mut v = vec![0.0f64; d * d];
+    for i in 0..d {
+        v[i * d + i] = 1.0;
+    }
+    for _ in 0..MAX_SWEEPS {
+        // 非対角成分の大きさ
+        let off: f64 = (0..d)
+            .flat_map(|i| (0..d).map(move |j| (i, j)))
+            .filter(|(i, j)| i != j)
+            .map(|(i, j)| a[i * d + j] * a[i * d + j])
+            .sum();
+        if off < 1e-18 {
+            break;
+        }
+        for p in 0..d {
+            for q in p + 1..d {
+                let apq = a[p * d + q];
+                if apq.abs() < 1e-15 {
+                    continue;
+                }
+                // 回転角: cot(2θ) = (a_qq − a_pp) / (2 a_pq)
+                let theta = (a[q * d + q] - a[p * d + p]) / (2.0 * apq);
+                let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
+                let c = 1.0 / (t * t + 1.0).sqrt();
+                let s = t * c;
+                for k in 0..d {
+                    let akp = a[k * d + p];
+                    let akq = a[k * d + q];
+                    a[k * d + p] = c * akp - s * akq;
+                    a[k * d + q] = s * akp + c * akq;
+                }
+                for k in 0..d {
+                    let apk = a[p * d + k];
+                    let aqk = a[q * d + k];
+                    a[p * d + k] = c * apk - s * aqk;
+                    a[q * d + k] = s * apk + c * aqk;
+                }
+                for k in 0..d {
+                    let vkp = v[k * d + p];
+                    let vkq = v[k * d + q];
+                    v[k * d + p] = c * vkp - s * vkq;
+                    v[k * d + q] = s * vkp + c * vkq;
+                }
+            }
+        }
+    }
+    let eigenvalues: Vec<f64> = (0..d).map(|i| a[i * d + i]).collect();
+    // 列 → 行に転置して「第 i 固有ベクトル = 行 i」にする
+    let mut rows = vec![0.0f64; d * d];
+    for i in 0..d {
+        for j in 0..d {
+            rows[i * d + j] = v[j * d + i];
+        }
+    }
+    (eigenvalues, rows)
+}
+
+/// パラメトリック OPQ の初期値 (docs/design/opq.md §1.1)。
+///
+/// 学習サンプルの共分散を固有分解し、**固有値 (= 主成分の分散) の積が
+/// サブベクトル間で均等になるように**固有ベクトルを配る (固有値割り当て)。
+/// PQ の歪みは各サブベクトルの分散の幾何平均の和で決まるので、AM-GM より
+/// これを均すのが最小化に効く。回転後の次元は無相関にもなる。
+fn parametric_init(vectors: &[&[f32]], d: usize, m: usize) -> Vec<f32> {
+    if d == 0 || m == 0 || !d.is_multiple_of(m) || vectors.len() < 2 {
+        return identity(d);
+    }
+    // 共分散 (平均引き)。d×d なので d が数百までなら現実的
+    let n = vectors.len() as f64;
+    let mut mean = vec![0.0f64; d];
+    for v in vectors {
+        for (acc, x) in mean.iter_mut().zip(v.iter()) {
+            *acc += *x as f64;
+        }
+    }
+    for x in mean.iter_mut() {
+        *x /= n;
+    }
+    let mut cov = vec![0.0f32; d * d];
+    let mut centered = vec![0.0f64; d];
+    for v in vectors {
+        for (c, (x, mu)) in centered.iter_mut().zip(v.iter().zip(&mean)) {
+            *c = *x as f64 - mu;
+        }
+        for i in 0..d {
+            let ci = centered[i];
+            if ci == 0.0 {
+                continue;
+            }
+            for j in 0..d {
+                cov[i * d + j] += (ci * centered[j]) as f32;
+            }
+        }
+    }
+
+    let (eigenvalues, eigenvectors) = jacobi_eigen(&cov, d);
+    // 固有値降順の並び
+    let mut order: Vec<usize> = (0..d).collect();
+    order.sort_by(|&a, &b| {
+        eigenvalues[b]
+            .partial_cmp(&eigenvalues[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // 固有値割り当て: 大きい順に「積が最小のサブベクトル」へ入れる
+    // (積は log 和で持つ。分散 0 の固有値は下限でクランプ)
+    let dsub = d / m;
+    let mut buckets: Vec<Vec<usize>> = vec![Vec::with_capacity(dsub); m];
+    let mut log_prod = vec![0.0f64; m];
+    for &idx in &order {
+        let lambda = eigenvalues[idx].max(1e-12);
+        let target = (0..m)
+            .filter(|&b| buckets[b].len() < dsub)
+            .min_by(|&a, &b| {
+                log_prod[a]
+                    .partial_cmp(&log_prod[b])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or(0);
+        buckets[target].push(idx);
+        log_prod[target] += lambda.ln();
+    }
+
+    // 行 = 固有ベクトル (サブベクトル順に並べる)
+    let mut r = vec![0.0f32; d * d];
+    let mut row = 0usize;
+    for bucket in &buckets {
+        for &idx in bucket {
+            for j in 0..d {
+                r[row * d + j] = eigenvectors[idx * d + j] as f32;
+            }
+            row += 1;
+        }
+    }
+    // 数値誤差で直交から外れたら恒等に落とす (安全側)
+    if ortho_error(&r, d) < ORTHO_TOL {
+        r
+    } else {
+        identity(d)
+    }
+}
+
 /// 決定的な乱数直交行列 (Gram-Schmidt 直交化)。
 ///
 /// 交互最適化の初期値。**恒等行列から始めてはいけない**: 軸に沿った分布では
@@ -326,12 +476,12 @@ impl OpqRotation {
     /// 回転行列を学習する (交互最適化、docs/design/opq.md §1.1)。
     ///
     /// 初期値によって落ちる局所最適が大きく変わるため、**候補を実際に測って
-    /// 良い方を採る**:
+    /// 一番良いものを採る**:
     ///
     /// 1. 恒等行列から交互最適化 (自然な次元順に意味があるデータ向け。
     ///    SIFT のようにサブベクトルが元から相関しているとこれが最良)
-    /// 2. 1 が改善しなければ乱数直交行列からもう一度 (軸に沿った独立分布では
-    ///    恒等が停留点になり 1 歩も動かないため、その救済)
+    /// 2. パラメトリック初期値 (PCA + 固有値割り当て、todo 1105) から
+    ///    交互最適化。恒等が停留点になる軸に沿った分布で効く
     ///
     /// 最後に「回転なし (= 素の PQ)」の誤差とも比べ、勝てなければ恒等行列を
     /// 返す。**OPQ を有効にして PQ より悪くなることはない**。
@@ -350,6 +500,8 @@ impl OpqRotation {
         let mut best_r = identity(dim);
         let mut best_err = Self::sample_error(&sample, dim, m, seed, &best_r)?;
 
+        let no_rotation_err = best_err;
+
         // 1. 恒等初期値から交互最適化
         let r = Self::optimize(&sample, dim, m, seed, identity(dim))?;
         let err = Self::sample_error(&sample, dim, m, seed, &r)?;
@@ -358,9 +510,11 @@ impl OpqRotation {
             best_r = r;
         }
 
-        // 2. 目立った改善が無ければ乱数初期値も試す (恒等が停留点のケース)
-        if best_err > Self::sample_error(&sample, dim, m, seed, &identity(dim))? * 0.99 {
-            let r = Self::optimize(&sample, dim, m, seed, random_orthogonal(dim, seed))?;
+        // 2. 恒等が目立って改善しなければ (停留点の疑い)、パラメトリック
+        //    初期値からも試す。PCA + 固有値割り当てで分散を均した出発点
+        if best_err > no_rotation_err * 0.99 {
+            let init = parametric_init(&sample, dim, m);
+            let r = Self::optimize(&sample, dim, m, seed, init)?;
             let err = Self::sample_error(&sample, dim, m, seed, &r)?;
             if err < best_err {
                 best_r = r;
@@ -668,6 +822,89 @@ mod tests {
         assert!(
             opq <= plain * 1.05,
             "opq mse {opq} must not regress vs plain pq {plain}"
+        );
+    }
+
+    #[test]
+    fn jacobi_eigen_matches_known_matrix() {
+        // 対角行列: 固有値はそのまま
+        let d = 3;
+        let m = vec![3.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 2.0];
+        let (mut vals, vecs) = jacobi_eigen(&m, d);
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        for (got, want) in vals.iter().zip([1.0, 2.0, 3.0]) {
+            assert!((got - want).abs() < 1e-6, "{vals:?}");
+        }
+        // 固有ベクトル行列は直交
+        let v: Vec<f32> = vecs.iter().map(|&x| x as f32).collect();
+        assert!(ortho_error(&v, d) < ORTHO_TOL);
+
+        // 非対角あり: 2x2 の [[2,1],[1,2]] は固有値 1, 3
+        let (mut vals, vecs) = jacobi_eigen(&[2.0, 1.0, 1.0, 2.0], 2);
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!((vals[0] - 1.0).abs() < 1e-6 && (vals[1] - 3.0).abs() < 1e-6);
+        let v: Vec<f32> = vecs.iter().map(|&x| x as f32).collect();
+        assert!(ortho_error(&v, 2) < ORTHO_TOL);
+    }
+
+    #[test]
+    fn parametric_init_balances_variance() {
+        // 軸に沿って分散が大きく偏ったデータ (恒等が停留点になるケース)
+        const DIM: usize = 8;
+        const M: usize = 2;
+        let data = variance_skewed(600, DIM, 21);
+        let slices = as_slices(&data);
+        let r = parametric_init(&slices, DIM, M);
+        assert!(ortho_error(&r, DIM) < ORTHO_TOL, "init must be orthogonal");
+
+        // 回転後はサブベクトルごとの分散の幾何平均が近づく
+        let rot = OpqRotation {
+            dim: DIM,
+            r: r.clone(),
+        };
+        let rotated: Vec<Vec<f32>> = data.iter().map(|v| rot.apply(v)).collect();
+        let geo_mean = |from: usize| -> f64 {
+            let dsub = DIM / M;
+            let mut log_sum = 0.0;
+            for j in from..from + dsub {
+                let mean: f64 =
+                    rotated.iter().map(|v| v[j] as f64).sum::<f64>() / rotated.len() as f64;
+                let var: f64 = rotated
+                    .iter()
+                    .map(|v| (v[j] as f64 - mean).powi(2))
+                    .sum::<f64>()
+                    / rotated.len() as f64;
+                log_sum += var.max(1e-12).ln();
+            }
+            (log_sum / (DIM / M) as f64).exp()
+        };
+        let (a, b) = (geo_mean(0), geo_mean(DIM / M));
+        let ratio = a.max(b) / a.min(b);
+        assert!(
+            ratio < 2.0,
+            "variance geo-means must be balanced: {a} vs {b}"
+        );
+
+        // 回転なしの偏り (元データ) より均等であること
+        let raw_geo = |from: usize| -> f64 {
+            let dsub = DIM / M;
+            let mut log_sum = 0.0;
+            for j in from..from + dsub {
+                let mean: f64 = data.iter().map(|v| v[j] as f64).sum::<f64>() / data.len() as f64;
+                let var: f64 = data
+                    .iter()
+                    .map(|v| (v[j] as f64 - mean).powi(2))
+                    .sum::<f64>()
+                    / data.len() as f64;
+                log_sum += var.max(1e-12).ln();
+            }
+            (log_sum / dsub as f64).exp()
+        };
+        let (ra, rb) = (raw_geo(0), raw_geo(DIM / M));
+        assert!(
+            ratio < ra.max(rb) / ra.min(rb),
+            "rotation must reduce the imbalance ({ratio} vs {})",
+            ra.max(rb) / ra.min(rb)
         );
     }
 
