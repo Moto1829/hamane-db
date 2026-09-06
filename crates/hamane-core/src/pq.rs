@@ -467,11 +467,42 @@ impl PqCodebook {
         }
     }
 
-    /// クエリと全セントロイドの距離を先計算した LUT (`m × KSUB`) を作る。
+    /// クエリと全セントロイドの距離を先計算した LUT を作る。
     ///
     /// 各エントリは **「小さいほど近い」に正規化済み** (L2 は距離²、Dot/Cosine は
     /// 内積の符号反転)。したがって `distance_key` は符号を気にせず表引き加算でよい。
+    ///
+    /// - nbits=8: `m × 256` のサブベクトル別テーブル
+    /// - nbits=4: **バイト単位の合成テーブル `(m/2) × 256`** (todo 1204)。
+    ///   4bit は 1 バイトに 2 サブコードが入るので、そのバイト値をそのまま引けば
+    ///   2 サブベクトルぶんの距離が 1 回で得られる。表引き回数が半分になり、
+    ///   ニブル展開も消える (同じコード長の 8bit と同じループ回数になる)
     pub fn build_lut(&self, query: &[f32], metric: Metric) -> Vec<f32> {
+        let base = self.build_sub_lut(query, metric);
+        if self.nbits != 4 {
+            return base;
+        }
+        // 合成: byte b = (hi << 4) | lo → lut[2i][lo] + lut[2i+1][hi]
+        let pairs = self.m / 2;
+        let mut fused = vec![0.0f32; pairs * 256 + if self.m % 2 == 1 { 16 } else { 0 }];
+        for i in 0..pairs {
+            let lo_row = &base[2 * i * 16..2 * i * 16 + 16];
+            let hi_row = &base[(2 * i + 1) * 16..(2 * i + 1) * 16 + 16];
+            let out = &mut fused[i * 256..(i + 1) * 256];
+            for (b, slot) in out.iter_mut().enumerate() {
+                *slot = lo_row[b & 0x0f] + hi_row[b >> 4];
+            }
+        }
+        // m が奇数なら最後の 1 サブベクトルは従来どおり 16 エントリで持つ
+        if self.m % 2 == 1 {
+            let last = &base[(self.m - 1) * 16..self.m * 16];
+            fused[pairs * 256..pairs * 256 + 16].copy_from_slice(last);
+        }
+        fused
+    }
+
+    /// サブベクトル別の生 LUT (`m × k*`)。合成前の形。
+    fn build_sub_lut(&self, query: &[f32], metric: Metric) -> Vec<f32> {
         debug_assert_eq!(query.len(), self.dim());
         let ksub = self.ksub();
         let mut lut = vec![0.0f32; self.m * ksub];
@@ -498,10 +529,23 @@ impl PqCodebook {
     #[inline]
     pub fn distance_key(&self, lut: &[f32], code: &[u8]) -> f32 {
         debug_assert_eq!(code.len(), self.code_bytes());
+        if self.nbits == 4 {
+            // バイト値をそのまま引く (2 サブベクトルぶんの合成テーブル)
+            let pairs = self.m / 2;
+            let mut sum = 0.0f32;
+            for (i, &byte) in code.iter().take(pairs).enumerate() {
+                sum += lut[i * 256 + byte as usize];
+            }
+            if self.m % 2 == 1 {
+                // 端数のサブベクトルは下位ニブルだけを 16 エントリ表から引く
+                sum += lut[pairs * 256 + (code[pairs] & 0x0f) as usize];
+            }
+            return sum;
+        }
         let ksub = self.ksub();
         let mut sum = 0.0f32;
         for j in 0..self.m {
-            sum += lut[j * ksub + self.sub_code(code, j)];
+            sum += lut[j * ksub + code[j] as usize];
         }
         sum
     }
@@ -859,5 +903,36 @@ mod tests {
             );
         }
         assert!(PqCodebook::from_centroids(2, 4, 6, vec![0.0; 2 * 64 * 4]).is_err());
+    }
+
+    #[test]
+    fn fused_byte_lut_matches_subvector_lut() {
+        // nbits=4 の合成 LUT (バイト単位 256 エントリ) が、サブベクトル別の
+        // 16 エントリ表を 2 回引いた値と一致すること (todo 1204)
+        for (dim, m) in [(16usize, 8usize), (16, 4), (12, 3)] {
+            let data = clustered_data(300, dim, 5, 17);
+            let slices = as_slices(&data);
+            let cb = PqCodebook::train(&slices, dim, m, 4, 2, 65536, 20).unwrap();
+            let q = &data[7];
+            for metric in [Metric::L2, Metric::Dot] {
+                let fused = cb.build_lut(q, metric);
+                let sub = cb.build_sub_lut(q, metric);
+                let mut code = Vec::new();
+                for v in data.iter().take(20) {
+                    code.clear();
+                    cb.encode(v, &mut code);
+                    let got = cb.distance_key(&fused, &code);
+                    // 参照: サブベクトル別テーブルをニブル展開して足す
+                    let mut want = 0.0f32;
+                    for j in 0..m {
+                        want += sub[j * 16 + cb.sub_code(&code, j)];
+                    }
+                    assert!(
+                        (got - want).abs() <= want.abs() * 1e-5 + 1e-5,
+                        "dim={dim} m={m} {metric:?}: fused {got} vs sub {want}"
+                    );
+                }
+            }
+        }
     }
 }
