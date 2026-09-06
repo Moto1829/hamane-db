@@ -163,7 +163,7 @@ trait VectorIndex {
 
 ### 将来拡張(未対象)
 
-- 4/6-bit PQ サブコード、パラメトリック OPQ (PCA 初期化)
+- PQ4 の SIMD fast-scan (16 エントリ LUT のシャッフル評価)
 
 ---
 
@@ -253,6 +253,7 @@ Cargo workspace で分割する:
 | M5〜M9 | 性能・機能拡張・運用・レプリケーション | todos/README.md 参照 (完了) |
 | M10 | 量子化とクラスタリング索引 (PQ / IVF / IVF-PQ) | **達成** (各構成で recall@10 ≥ 0.95、docs/benchmarks.md に実測。SQ8 は recall 同等で QPS 2x) |
 | M11 | OPQ (回転付き PQ) | 同じ m で PQ より低い量子化誤差 (docs/design/opq.md) |
+| M12 | 4-bit PQ サブコード | **達成** (同コード長で 8bit 以上の recall・構築 2.3 倍速。docs/benchmarks.md) |
 
 ---
 

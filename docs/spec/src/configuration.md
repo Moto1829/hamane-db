@@ -34,6 +34,7 @@ open 時に `InvalidConfig` エラーになります。
 | `compaction_threshold` | 4 | セグメント数がこの値以上で自動コンパクション |
 | `quantization` | `None` | 量子化方式 (`Sq8` / `Pq { m }`)。[検索](search.md#量子化による高速化) 参照 |
 | `opq` | false | PQ の前に直交回転を学習する (OPQ)。`quantization = Pq` のときのみ有効 |
+| `pq_nbits` | 8 | PQ のサブコード幅 (4 か 8)。4 は 1 行のコードが半分になる代わりに粗くなる |
 | `index` | `Hnsw` | 主索引の種類 (`Hnsw` / `Ivf` / `IvfPq`)。HNSW と IVF は排他 |
 | `nprobe` | 8 | IVF / IVF-PQ で走査するクラスタ数の既定値。`.nprobe(n)` で上書き可 |
 | `search_threads` | 0 (自動 = 論理コア数) | セグメント並列検索の並列度。1 で逐次。プールは Database 全体で共有され、初回の複数セグメント検索まで worker は起動しない |
@@ -65,6 +66,9 @@ open 時に `InvalidConfig` エラーになります。
 
 `Pq { m }` の `m` はサブベクトル数で、`None` なら次元から自動決定します
 (`dim` の約数のうち `dim/m ≥ 4` かつ `m ≤ 96` の最大値。dim=128 → m=32)。
+1 行のコード長は `ceil(m × pq_nbits / 8)` バイトです。**メモリを固定して
+`pq_nbits: 4` を使うなら `m` を 2 倍**にします (分割が細かくなり、セントロイドが
+16 個に減る不利を相殺できる)。
 詳細は [量子化とクラスタリング索引の設計](https://github.com/Moto1829/hamane-db/blob/main/docs/design/quantization.md)。
 
 ## HnswParams

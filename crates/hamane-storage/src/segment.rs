@@ -81,6 +81,9 @@ pub struct IndexBuildSpec {
     /// PQ コードブックの前に直交回転を学習する (OPQ, todo 1103)。
     /// quantization = Pq のときのみ意味を持つ (docs/design/opq.md §4)
     pub opq: bool,
+    /// PQ のサブコード幅 (4 か 8、既定 8。todo 1202)。
+    /// 4 は 1 行のコードが半分になる代わりに粗くなる
+    pub pq_nbits: u8,
 }
 
 /// count 件のセグメントに対する IVF のクラスタ数を決める。
@@ -234,7 +237,16 @@ impl SegmentWriter {
                             Some(Quantization::Pq { m }) => m,
                             _ => None,
                         };
-                        Self::write_ivfpq(&tmp_dir, seg_id, m, spec.opq, &rows, dim, count)?
+                        Self::write_ivfpq(
+                            &tmp_dir,
+                            seg_id,
+                            m,
+                            spec.pq_nbits,
+                            spec.opq,
+                            &rows,
+                            dim,
+                            count,
+                        )?
                     }
                 }
             }
@@ -255,11 +267,13 @@ impl SegmentWriter {
     ///
     /// `opq = false` なら `None` (従来 PQ)。学習は縮退入力でも恒等行列に
     /// フォールバックするので、呼び出し側は失敗を気にしなくてよい。
+    #[allow(clippy::too_many_arguments)]
     fn train_opq(
         tmp_dir: &Path,
         opq: bool,
         seg_id: u64,
         m: usize,
+        nbits: u8,
         vecs: &[&[f32]],
         dim: usize,
     ) -> Result<Option<Vec<Vec<f32>>>> {
@@ -267,7 +281,7 @@ impl SegmentWriter {
             return Ok(None);
         }
         // seed はセグメント ID で決定的に (コードブック・HNSW と同様)
-        let rotation = OpqRotation::train(vecs, dim, m, seg_id)?;
+        let rotation = OpqRotation::train(vecs, dim, m, nbits, seg_id)?;
         let rotated: Vec<Vec<f32>> = vecs.iter().map(|v| rotation.apply(v)).collect();
 
         let mut buf = Vec::with_capacity(OPQ_HEADER_LEN + dim * dim * 4);
@@ -326,8 +340,9 @@ impl SegmentWriter {
                     // OPQ (todo 1103): 回転を学習して opq.bin を書き、以降は
                     // 回転後空間で符号化する。回転は L2/内積を保存するので
                     // 探索側はクエリを同じ行列で回すだけでよい
+                    let nbits = spec.pq_nbits;
                     let rotated =
-                        Self::train_opq(tmp_dir, spec.opq, seg_id, m, &vecs, dim as usize)?;
+                        Self::train_opq(tmp_dir, spec.opq, seg_id, m, nbits, &vecs, dim as usize)?;
                     let rotated_slices: Vec<&[f32]>;
                     let data: &[&[f32]] = match &rotated {
                         Some(r) => {
@@ -341,18 +356,21 @@ impl SegmentWriter {
                         data,
                         dim as usize,
                         m,
+                        nbits,
                         seg_id,
                         pq::DEFAULT_TRAIN_SAMPLE,
                         pq::DEFAULT_MAX_ITER,
                     )?;
                     let cb = codebook.centroids();
-                    let mut buf = Vec::with_capacity(PQ_HEADER_LEN + cb.len() * 4 + rows.len() * m);
+                    let mut buf = Vec::with_capacity(
+                        PQ_HEADER_LEN + cb.len() * 4 + rows.len() * codebook.code_bytes(),
+                    );
                     buf.extend_from_slice(&MAGIC_PQ);
                     format::put_u32(&mut buf, dim);
                     format::put_u64(&mut buf, count);
                     format::put_u32(&mut buf, m as u32);
-                    buf.push(pq::NBITS);
-                    format::put_u32(&mut buf, pq::KSUB as u32);
+                    buf.push(nbits);
+                    format::put_u32(&mut buf, pq::ksub(nbits) as u32);
                     buf.resize(PQ_HEADER_LEN, 0);
                     format::put_f32_slice(&mut buf, cb);
                     for vector in data {
@@ -419,6 +437,7 @@ impl SegmentWriter {
         tmp_dir: &Path,
         seg_id: u64,
         m: Option<usize>,
+        nbits: u8,
         opq: bool,
         rows: &[(Id, &[f32], &Metadata)],
         dim: u32,
@@ -437,7 +456,7 @@ impl SegmentWriter {
         let vecs: Vec<&[f32]> = rows.iter().map(|(_, v, _)| *v).collect();
         // OPQ (todo 1103): 粗量子化も残差 PQ も回転後空間で行う。回転は L2 を
         // 保存するので粗セントロイドの意味は変わらない
-        let rotated = Self::train_opq(tmp_dir, opq, seg_id, m, &vecs, d)?;
+        let rotated = Self::train_opq(tmp_dir, opq, seg_id, m, nbits, &vecs, d)?;
         let rotated_slices: Vec<&[f32]>;
         let data: &[&[f32]] = match &rotated {
             Some(r) => {
@@ -469,6 +488,7 @@ impl SegmentWriter {
             &res_slices,
             d,
             m,
+            nbits,
             seg_id ^ 0xF1F1_F1F1,
             pq::DEFAULT_TRAIN_SAMPLE,
             pq::DEFAULT_MAX_ITER,
@@ -495,15 +515,15 @@ impl SegmentWriter {
                 + cb.len() * 4
                 + (nlist + 1) * 8
                 + rows.len() * 4
-                + rows.len() * m,
+                + rows.len() * codebook.code_bytes(),
         );
         buf.extend_from_slice(&MAGIC_IVFPQ);
         format::put_u32(&mut buf, dim);
         format::put_u64(&mut buf, count);
         format::put_u32(&mut buf, nlist as u32);
         format::put_u32(&mut buf, m as u32);
-        buf.push(pq::NBITS);
-        format::put_u32(&mut buf, pq::KSUB as u32);
+        buf.push(nbits);
+        format::put_u32(&mut buf, pq::ksub(nbits) as u32);
         buf.resize(IVFPQ_HEADER_LEN, 0);
         format::put_f32_slice(&mut buf, &centroids);
         format::put_f32_slice(&mut buf, cb);
@@ -624,6 +644,12 @@ pub struct IvfPqView<'a> {
 }
 
 impl IvfPqView<'_> {
+    /// 残差 PQ のサブコード幅 (4 か 8)。
+    #[inline]
+    pub fn nbits(&self) -> u8 {
+        self.codebook.nbits()
+    }
+
     #[inline]
     fn offset(&self, i: usize) -> usize {
         u64::from_le_bytes(self.offsets[i * 8..i * 8 + 8].try_into().unwrap()) as usize
@@ -680,8 +706,8 @@ impl IvfPqView<'_> {
     /// CSR インデックス i の残差 ADC 距離キー (bias は呼び出し側で加算)。
     #[inline]
     pub fn code_distance(&self, lut: &[f32], i: usize) -> f32 {
-        let m = self.codebook.m();
-        let code = &self.codes[i * m..i * m + m];
+        let bytes = self.codebook.code_bytes();
+        let code = &self.codes[i * bytes..i * bytes + bytes];
         self.codebook.distance_key(lut, code)
     }
 }
@@ -755,6 +781,12 @@ pub struct PqView<'a> {
 }
 
 impl PqView<'_> {
+    /// サブコード幅 (4 か 8)。4 は 1 段目が粗いので候補数を増やす判断に使う。
+    #[inline]
+    pub fn nbits(&self) -> u8 {
+        self.codebook.nbits()
+    }
+
     /// クエリと全セントロイドの距離表 (LUT) を作る。検索の開始時に 1 回。
     pub fn build_lut(&self, query: &[f32], metric: Metric) -> Vec<f32> {
         self.codebook.build_lut(query, metric)
@@ -763,9 +795,9 @@ impl PqView<'_> {
     /// 行 row のコード。
     #[inline]
     fn code(&self, row: u32) -> &[u8] {
-        let m = self.codebook.m();
-        let start = row as usize * m;
-        &self.codes[start..start + m]
+        let bytes = self.codebook.code_bytes();
+        let start = row as usize * bytes;
+        &self.codes[start..start + bytes]
     }
 
     /// LUT と行 row から「小さいほど近い」距離キーを推定する (表引き加算)。
@@ -823,7 +855,7 @@ fn load_pq(path: &Path, seg_dim: usize, seg_count: usize) -> Result<PqSegment> {
     if dim != seg_dim || count != seg_count {
         return Err(corrupted("pq dim/count mismatch with segment"));
     }
-    if nbits != pq::NBITS || ksub != pq::KSUB {
+    if !pq::is_supported_nbits(nbits) || ksub != pq::ksub(nbits) {
         return Err(corrupted("pq unsupported nbits/ksub"));
     }
     if m == 0 || !dim.is_multiple_of(m) {
@@ -832,7 +864,8 @@ fn load_pq(path: &Path, seg_dim: usize, seg_count: usize) -> Result<PqSegment> {
     let dsub = dim / m;
     let cb_bytes = m * ksub * dsub * 4;
     let codes_start = PQ_HEADER_LEN + cb_bytes;
-    if content.len() != codes_start + count * m {
+    // nbits=4 は 1 行 m/2 バイト (todo 1202)
+    if content.len() != codes_start + count * pq::code_bytes(m, nbits) {
         return Err(corrupted("pq data size mismatch"));
     }
     // コードブック (f32) を復元
@@ -840,7 +873,7 @@ fn load_pq(path: &Path, seg_dim: usize, seg_count: usize) -> Result<PqSegment> {
     for chunk in content[PQ_HEADER_LEN..codes_start].as_chunks::<4>().0 {
         centroids.push(f32::from_le_bytes(*chunk));
     }
-    let codebook = PqCodebook::from_centroids(m, dsub, centroids)?;
+    let codebook = PqCodebook::from_centroids(m, dsub, nbits, centroids)?;
     Ok(PqSegment {
         codebook,
         mapped,
@@ -913,7 +946,7 @@ fn load_ivfpq(path: &Path, seg_dim: usize, seg_count: usize) -> Result<IvfPqSegm
     if nlist == 0 {
         return Err(corrupted("ivfpq nlist is zero"));
     }
-    if nbits != pq::NBITS || ksub != pq::KSUB {
+    if !pq::is_supported_nbits(nbits) || ksub != pq::ksub(nbits) {
         return Err(corrupted("ivfpq unsupported nbits/ksub"));
     }
     if m == 0 || !dim.is_multiple_of(m) {
@@ -925,7 +958,7 @@ fn load_ivfpq(path: &Path, seg_dim: usize, seg_count: usize) -> Result<IvfPqSegm
     let offsets_start = cb_start + m * ksub * dsub * 4;
     let entries_start = offsets_start + (nlist + 1) * 8;
     let codes_start = entries_start + count * 4;
-    if content.len() != codes_start + count * m {
+    if content.len() != codes_start + count * pq::code_bytes(m, nbits) {
         return Err(corrupted("ivfpq data size mismatch"));
     }
     // 粗セントロイドと残差 PQ コードブックを復元
@@ -937,7 +970,7 @@ fn load_ivfpq(path: &Path, seg_dim: usize, seg_count: usize) -> Result<IvfPqSegm
     for chunk in content[cb_start..offsets_start].as_chunks::<4>().0 {
         cb.push(f32::from_le_bytes(*chunk));
     }
-    let codebook = PqCodebook::from_centroids(m, dsub, cb)?;
+    let codebook = PqCodebook::from_centroids(m, dsub, nbits, cb)?;
     // CSR 末尾オフセットが総行数に一致することを確認
     let last = u64::from_le_bytes(
         content[entries_start - 8..entries_start]

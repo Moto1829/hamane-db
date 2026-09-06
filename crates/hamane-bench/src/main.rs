@@ -57,6 +57,9 @@ struct Args {
     /// PQ / IVF-PQ のサブベクトル数 m (省略時は dim から自動決定)
     #[arg(long)]
     pq_m: Option<usize>,
+    /// PQ のサブコード幅 (4 か 8、既定 8。todo 1203)
+    #[arg(long, default_value_t = 8)]
+    pq_nbits: u8,
     /// IVF / IVF-PQ の nprobe スイープ (カンマ区切り)
     #[arg(long, default_value = "1,8,16,32,64")]
     nprobe: String,
@@ -224,6 +227,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             index,
             quantization,
             opq,
+            pq_nbits: args.pq_nbits,
             ..Default::default()
         },
     )?;
