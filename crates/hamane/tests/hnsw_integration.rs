@@ -652,3 +652,239 @@ fn concurrent_searches_are_consistent() {
         }
     });
 }
+
+/// OPQ (todo 1103): 回転付き PQ でも 2 段階検索の recall が保たれ、opq.bin が
+/// 再 open 後も使われること。回転は直交なのでスコアは生 f32 距離のまま。
+#[test]
+fn opq_pq_search_preserves_recall() {
+    let dir = tempfile::tempdir().unwrap();
+    let opts = || StoreOptions {
+        hnsw_min_rows: 64,
+        quantization: Some(Quantization::Pq { m: None }),
+        opq: true,
+        ..Default::default()
+    };
+    let db = Database::open_with_options(dir.path(), opts()).unwrap();
+    let col = db
+        .create_collection(
+            "docs",
+            CollectionConfig {
+                dim: DIM,
+                metric: Metric::L2,
+            },
+        )
+        .unwrap();
+
+    let mut rng = StdRng::seed_from_u64(1103);
+    let mut data = Vec::new();
+    let records: Vec<Record> = (0..3000u64)
+        .map(|i| {
+            let v = random_vec(&mut rng);
+            data.push((i, v.clone()));
+            Record::new(i, v)
+        })
+        .collect();
+    col.upsert_batch(records).unwrap();
+    col.flush().unwrap();
+
+    // opq.bin が書かれている (セグメントディレクトリ直下)
+    let opq_files: Vec<_> = walk_segment_files(dir.path(), "opq.bin");
+    assert!(!opq_files.is_empty(), "opq.bin must be written");
+
+    let mut total = 0.0;
+    let queries = 50;
+    for _ in 0..queries {
+        let q = random_vec(&mut rng);
+        let hits: Vec<u64> = col
+            .search(&q)
+            .k(10)
+            .run()
+            .unwrap()
+            .iter()
+            .map(|h| h.id)
+            .collect();
+        let truth = flat_topk(data.iter().map(|(i, v)| (*i, v)), &q, 10, |_| true);
+        total += recall(&hits, &truth);
+    }
+    let avg = total / queries as f64;
+    assert!(avg >= 0.95, "opq two-stage recall@10 = {avg:.3}");
+
+    // 再 open しても OPQ 経路が生きている (score は正確な f32 距離)
+    drop(col);
+    drop(db);
+    let db = Database::open_with_options(dir.path(), opts()).unwrap();
+    let col = db.collection("docs").unwrap();
+    let q = random_vec(&mut rng);
+    let hits = col.search(&q).k(5).run().unwrap();
+    assert_eq!(hits.len(), 5);
+    let exact = Metric::L2
+        .distance_key(&q, &data[hits[0].id as usize].1)
+        .sqrt();
+    assert!(
+        (hits[0].score - exact).abs() < 1e-4,
+        "score must be exact f32 distance"
+    );
+}
+
+/// OPQ + IVF-PQ (todo 1103): 粗量子化も残差 PQ も回転後空間で行い、
+/// full-probe で高い recall を保つこと。
+#[test]
+fn opq_ivfpq_search_preserves_recall() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open_with_options(
+        dir.path(),
+        StoreOptions {
+            hnsw_min_rows: 64,
+            index: hamane::IndexKind::IvfPq,
+            quantization: Some(Quantization::Pq { m: None }),
+            opq: true,
+            nprobe: 8,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let col = db
+        .create_collection(
+            "docs",
+            CollectionConfig {
+                dim: DIM,
+                metric: Metric::L2,
+            },
+        )
+        .unwrap();
+
+    let mut rng = StdRng::seed_from_u64(11031);
+    let mut data = Vec::new();
+    let records: Vec<Record> = (0..3000u64)
+        .map(|i| {
+            let v = random_vec(&mut rng);
+            data.push((i, v.clone()));
+            Record::new(i, v)
+        })
+        .collect();
+    col.upsert_batch(records).unwrap();
+    col.flush().unwrap();
+    assert!(!walk_segment_files(dir.path(), "opq.bin").is_empty());
+
+    let mut total = 0.0;
+    let queries = 40;
+    for _ in 0..queries {
+        let q = random_vec(&mut rng);
+        let hits: Vec<u64> = col
+            .search(&q)
+            .k(10)
+            .nprobe(1000)
+            .run()
+            .unwrap()
+            .iter()
+            .map(|h| h.id)
+            .collect();
+        let truth = flat_topk(data.iter().map(|(i, v)| (*i, v)), &q, 10, |_| true);
+        total += recall(&hits, &truth);
+    }
+    let avg = total / queries as f64;
+    assert!(avg >= 0.90, "opq ivfpq full-probe recall@10 = {avg:.3}");
+}
+
+/// OPQ (todo 1103): opq.bin を消しても (= M10 で書いたセグメント) 読める。
+/// ただしコードは回転後空間なので、回転を失うと精度は落ちる。ここでは
+/// 「壊れず読めて検索が返る」ことだけを確認する (前方互換の保証)。
+#[test]
+fn segment_without_opq_file_still_opens() {
+    let dir = tempfile::tempdir().unwrap();
+    let opts = |opq: bool| StoreOptions {
+        hnsw_min_rows: 64,
+        quantization: Some(Quantization::Pq { m: None }),
+        opq,
+        ..Default::default()
+    };
+    let db = Database::open_with_options(dir.path(), opts(true)).unwrap();
+    let col = db
+        .create_collection(
+            "docs",
+            CollectionConfig {
+                dim: DIM,
+                metric: Metric::L2,
+            },
+        )
+        .unwrap();
+    let mut rng = StdRng::seed_from_u64(9);
+    let records: Vec<Record> = (0..2000u64)
+        .map(|i| Record::new(i, random_vec(&mut rng)))
+        .collect();
+    col.upsert_batch(records).unwrap();
+    col.flush().unwrap();
+    drop(col);
+    drop(db);
+
+    for path in walk_segment_files(dir.path(), "opq.bin") {
+        std::fs::remove_file(path).unwrap();
+    }
+
+    let db = Database::open_with_options(dir.path(), opts(false)).unwrap();
+    let col = db.collection("docs").unwrap();
+    let hits = col.search(&random_vec(&mut rng)).k(5).run().unwrap();
+    assert_eq!(hits.len(), 5);
+}
+
+/// DB ディレクトリ配下から指定名のセグメントファイルを集める (テスト用)。
+fn walk_segment_files(root: &std::path::Path, name: &str) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.file_name().map(|f| f == name).unwrap_or(false) {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+/// OPQ (todo 1103): opq.bin の破損は open 時の直交性検証で弾かれる
+/// (CRC は他のセグメントファイルと同じく `verify_checksums` の担当)。
+#[test]
+fn corrupted_opq_file_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let opts = || StoreOptions {
+        hnsw_min_rows: 64,
+        quantization: Some(Quantization::Pq { m: None }),
+        opq: true,
+        ..Default::default()
+    };
+    let db = Database::open_with_options(dir.path(), opts()).unwrap();
+    let col = db
+        .create_collection(
+            "docs",
+            CollectionConfig {
+                dim: DIM,
+                metric: Metric::L2,
+            },
+        )
+        .unwrap();
+    let mut rng = StdRng::seed_from_u64(77);
+    let records: Vec<Record> = (0..2000u64)
+        .map(|i| Record::new(i, random_vec(&mut rng)))
+        .collect();
+    col.upsert_batch(records).unwrap();
+    col.flush().unwrap();
+    drop(col);
+    drop(db);
+
+    let path = walk_segment_files(dir.path(), "opq.bin").pop().unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    // header 64B 直後の f32 (R[0][0]) の指数部を壊す = 直交性が明確に崩れる
+    bytes[64 + 3] ^= 0x40;
+    std::fs::write(&path, &bytes).unwrap();
+
+    assert!(
+        Database::open_with_options(dir.path(), opts()).is_err(),
+        "corrupted opq.bin must be rejected"
+    );
+}

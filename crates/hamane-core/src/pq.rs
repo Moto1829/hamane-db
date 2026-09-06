@@ -45,16 +45,17 @@ pub fn choose_m(dim: usize) -> Option<usize> {
 }
 
 /// 決定的な擬似乱数 (LCG)。seed 固定で再現可能な学習のため、外部 rand に依存しない。
-struct Lcg(u64);
+/// OPQ (opq.rs) の乱数直交行列でも使う。
+pub(crate) struct Lcg(u64);
 
 impl Lcg {
-    fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         // seed 0 でも縮退しないよう定数を混ぜる
         Lcg(seed ^ 0x9E3779B97F4A7C15)
     }
 
     #[inline]
-    fn next_u64(&mut self) -> u64 {
+    pub(crate) fn next_u64(&mut self) -> u64 {
         self.0 = self
             .0
             .wrapping_mul(6364136223846793005)
@@ -64,7 +65,7 @@ impl Lcg {
 
     /// [0, 1) の一様乱数。
     #[inline]
-    fn next_unit(&mut self) -> f64 {
+    pub(crate) fn next_unit(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
 
@@ -362,6 +363,17 @@ impl PqCodebook {
                 }
             }
             out.push(best);
+        }
+    }
+
+    /// コードから元ベクトルを復元する (各サブベクトルをセントロイドで置換)。
+    /// OPQ の交互最適化 (todo 1102) と量子化誤差の計測に使う。
+    pub fn decode_into(&self, code: &[u8], out: &mut [f32]) {
+        debug_assert_eq!(code.len(), self.m);
+        debug_assert_eq!(out.len(), self.dim());
+        for j in 0..self.m {
+            let c = self.centroid(j, code[j] as usize);
+            out[j * self.dsub..(j + 1) * self.dsub].copy_from_slice(c);
         }
     }
 

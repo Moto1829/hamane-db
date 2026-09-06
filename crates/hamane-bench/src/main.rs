@@ -49,7 +49,8 @@ struct Args {
     /// HNSW 構築スレッド数 (0 = 自動)
     #[arg(long, default_value_t = 0)]
     build_threads: usize,
-    /// 索引/量子化構成: f32 | sq8 | pq | ivf | ivfpq (todo 1006)
+    /// 索引/量子化構成: f32 | sq8 | pq | opq | ivf | ivfpq | ivfopq
+    /// (todo 1006 / 1104)
     #[arg(long, default_value = "f32")]
     config: String,
     /// PQ / IVF-PQ のサブベクトル数 m (省略時は dim から自動決定)
@@ -60,15 +61,18 @@ struct Args {
     nprobe: String,
 }
 
-/// `--config` から (IndexKind, quantization) を作る。
-fn parse_config(config: &str, pq_m: Option<usize>) -> (IndexKind, Option<Quantization>) {
+/// `--config` から (IndexKind, quantization, opq) を作る。
+fn parse_config(config: &str, pq_m: Option<usize>) -> (IndexKind, Option<Quantization>, bool) {
     match config {
-        "f32" => (IndexKind::Hnsw, None),
-        "sq8" => (IndexKind::Hnsw, Some(Quantization::Sq8)),
-        "pq" => (IndexKind::Hnsw, Some(Quantization::Pq { m: pq_m })),
-        "ivf" => (IndexKind::Ivf, None),
-        "ivfpq" => (IndexKind::IvfPq, Some(Quantization::Pq { m: pq_m })),
-        other => panic!("unknown --config '{other}' (f32|sq8|pq|ivf|ivfpq)"),
+        "f32" => (IndexKind::Hnsw, None, false),
+        "sq8" => (IndexKind::Hnsw, Some(Quantization::Sq8), false),
+        "pq" => (IndexKind::Hnsw, Some(Quantization::Pq { m: pq_m }), false),
+        // opq / ivfopq は PQ に直交回転を足した構成 (todo 1104)
+        "opq" => (IndexKind::Hnsw, Some(Quantization::Pq { m: pq_m }), true),
+        "ivf" => (IndexKind::Ivf, None, false),
+        "ivfpq" => (IndexKind::IvfPq, Some(Quantization::Pq { m: pq_m }), false),
+        "ivfopq" => (IndexKind::IvfPq, Some(Quantization::Pq { m: pq_m }), true),
+        other => panic!("unknown --config '{other}' (f32|sq8|pq|opq|ivf|ivfpq|ivfopq)"),
     }
 }
 
@@ -189,7 +193,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if db_dir.exists() {
         std::fs::remove_dir_all(&db_dir)?;
     }
-    let (index, quantization) = parse_config(&args.config, args.pq_m);
+    let (index, quantization, opq) = parse_config(&args.config, args.pq_m);
     let db = Database::open_with_options(
         &db_dir,
         StoreOptions {
@@ -203,6 +207,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             index,
             quantization,
+            opq,
             ..Default::default()
         },
     )?;
