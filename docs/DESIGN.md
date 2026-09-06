@@ -158,10 +158,12 @@ trait VectorIndex {
 - 直積量子化 (PQ) / 転置ファイル (IVF) / IVF-PQ: M10 で追加。
   詳細は [design/quantization.md](design/quantization.md)。全て opt-in で
   フォーマット互換を保つ
+- OPQ (回転付き PQ): M11 で追加。詳細は [design/opq.md](design/opq.md)。
+  PQ の前段に直交回転を学習して挟むだけで、探索経路は PQ / IVF-PQ のまま
 
 ### 将来拡張(未対象)
 
-- OPQ (回転付き PQ)、4/6-bit PQ サブコード
+- 4/6-bit PQ サブコード、パラメトリック OPQ (PCA 初期化)
 
 ---
 
@@ -250,6 +252,7 @@ Cargo workspace で分割する:
 | M4 | コンパクション + ベンチ整備 + CLI | 長時間書き込みでディスクが収束する |
 | M5〜M9 | 性能・機能拡張・運用・レプリケーション | todos/README.md 参照 (完了) |
 | M10 | 量子化とクラスタリング索引 (PQ / IVF / IVF-PQ) | **達成** (各構成で recall@10 ≥ 0.95、docs/benchmarks.md に実測。SQ8 は recall 同等で QPS 2x) |
+| M11 | OPQ (回転付き PQ) | 同じ m で PQ より低い量子化誤差 (docs/design/opq.md) |
 
 ---
 

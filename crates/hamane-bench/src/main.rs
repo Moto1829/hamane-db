@@ -14,7 +14,8 @@ use std::time::Instant;
 
 use clap::Parser;
 use hamane::{
-    CollectionConfig, Database, IndexKind, Metric, Quantization, Record, StoreOptions, SyncPolicy,
+    CollectionConfig, Database, IndexKind, Metric, OpqRotation, Quantization, Record, StoreOptions,
+    SyncPolicy,
 };
 
 #[derive(Parser)]
@@ -59,6 +60,11 @@ struct Args {
     /// IVF / IVF-PQ の nprobe スイープ (カンマ区切り)
     #[arg(long, default_value = "1,8,16,32,64")]
     nprobe: String,
+    /// base/query に固定の乱数直交回転を掛けてから投入する (todo 1104)。
+    /// 「次元の並びに意味がないデータ」(多くの埋め込みモデル) を模擬する。
+    /// 直交変換は距離を保存するので正解 (groundtruth) は変わらない
+    #[arg(long)]
+    rotate_input: bool,
 }
 
 /// `--config` から (IndexKind, quantization, opq) を作る。
@@ -161,9 +167,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     eprintln!("loading dataset from {} ...", args.data.display());
-    let base = read_fvecs(&args.data.join("sift_base.fvecs"), args.limit)?;
-    let queries = read_fvecs(&args.data.join("sift_query.fvecs"), args.queries)?;
+    let mut base = read_fvecs(&args.data.join("sift_base.fvecs"), args.limit)?;
+    let mut queries = read_fvecs(&args.data.join("sift_query.fvecs"), args.queries)?;
     let dim = base.first().map(|v| v.len()).unwrap_or(0);
+    if args.rotate_input {
+        // 固定の乱数直交回転。直交変換は距離を保存するので正解は変わらないが、
+        // 「次元の並びに意味がある」構造 (SIFT のセル構造) は失われる
+        let r = OpqRotation::random_for_bench(dim, 0xB00C);
+        for v in base.iter_mut().chain(queries.iter_mut()) {
+            *v = r.apply(v);
+        }
+        eprintln!("input rotated by a fixed random orthogonal matrix");
+    }
+    let (base, queries) = (base, queries);
     eprintln!(
         "base: {} vectors, dim {}, queries: {}",
         base.len(),

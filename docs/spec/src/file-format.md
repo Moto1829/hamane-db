@@ -24,6 +24,10 @@
 | manifest | `HAMANEF\x02` (v1 = `\x01` も読める) |
 | hnsw.bin | `HAMANEH\x01` |
 | vectors_sq8.bin | `HAMANEQ\x01` |
+| vectors_pq.bin | `HAMANEP\x01` |
+| ivf.bin | `HAMANEC\x01` |
+| ivfpq.bin | `HAMANEG\x01` |
+| opq.bin | `HAMANEO\x01` |
 
 ## WAL (`wal/<seq:020>.wal`)
 
@@ -111,7 +115,7 @@ node は行番号 (u32) と一致する。
 
 ### vectors_sq8.bin (任意)
 
-SQ8 量子化ベクトル (`StoreOptions.sq8` 有効時のみ)。
+SQ8 量子化ベクトル (`quantization = Sq8` 有効時のみ)。
 
 ```text
 header (64B): magic, dim u32, count u64, min f32, max f32, pad
@@ -120,6 +124,53 @@ footer crc32c
 ```
 
 min/max は全次元共通 (グローバルスケール)。
+
+### vectors_pq.bin (任意)
+
+直積量子化 (PQ) のコードブックとコード (`quantization = Pq` 有効時のみ)。
+
+```text
+header (64B): magic, dim u32, count u64, m u32, nbits u8, ksub u32, pad
+codebook: m × ksub × dsub × f32   (dsub = dim / m、nbits=8 なので ksub=256)
+codes:    count × m × u8          (行 → m 個のサブコード)
+footer crc32c
+```
+
+### ivf.bin / ivfpq.bin (任意)
+
+IVF の粗セントロイドと転置リスト (CSR)。`index = Ivf` / `IvfPq` のとき、
+hnsw.bin の**代わりに**書かれる (HNSW と IVF は排他)。
+
+```text
+ivf.bin
+header (64B): magic, dim u32, count u64, nlist u32, pad
+centroids: nlist × dim × f32
+offsets:   (nlist+1) × u64        (CSR)
+entries:   count × u32            (行番号、リスト内は昇順)
+footer crc32c
+
+ivfpq.bin (IVF-PQ = 残差 PQ)
+header (64B): magic, dim u32, count u64, nlist u32, m u32, nbits u8, ksub u32, pad
+centroids: nlist × dim × f32
+codebook:  m × ksub × dsub × f32  (残差空間の共有コードブック)
+offsets:   (nlist+1) × u64
+entries:   count × u32
+codes:     count × m × u8         (entries と同順)
+footer crc32c
+```
+
+### opq.bin (任意)
+
+OPQ の直交回転行列 (`opq = true` のとき、vectors_pq.bin / ivfpq.bin と併存)。
+
+```text
+header (64B): magic, dim u32, pad
+rotation: dim × dim × f32   (行優先。符号化は R x に対して行われている)
+footer crc32c
+```
+
+open 時に `‖RᵀR − I‖_max < 1e-3` を検証する。このファイルが無ければ回転なしの
+PQ として読める (前方互換)。
 
 ### 文字列 ID (`_ext_id` メタデータ)
 

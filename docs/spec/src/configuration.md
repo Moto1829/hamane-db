@@ -6,7 +6,7 @@
 実行時オプションであり、DB には**永続化されません** (open のたびに指定)。
 
 ```rust
-use hamane::{Database, StoreOptions, SyncPolicy, HnswParams};
+use hamane::{Database, HnswParams, IndexKind, StoreOptions, SyncPolicy};
 
 let db = Database::open_with_options("./mydb", StoreOptions {
     sync: SyncPolicy::Always,
@@ -14,7 +14,10 @@ let db = Database::open_with_options("./mydb", StoreOptions {
     hnsw: HnswParams::default(),
     hnsw_min_rows: 1024,
     compaction_threshold: 4,
-    sq8: false,
+    quantization: None,
+    opq: false,
+    index: IndexKind::Hnsw,
+    nprobe: 8,
     search_threads: 0,
 })?;
 ```
@@ -29,7 +32,10 @@ open 時に `InvalidConfig` エラーになります。
 | `hnsw` | 下表 | フラッシュ時に構築する HNSW のパラメータ |
 | `hnsw_min_rows` | 1024 | この行数未満のセグメントは HNSW を作らない (Flat で検索) |
 | `compaction_threshold` | 4 | セグメント数がこの値以上で自動コンパクション |
-| `sq8` | false | SQ8 量子化 ([検索](search.md#sq8-量子化による高速化) 参照) |
+| `quantization` | `None` | 量子化方式 (`Sq8` / `Pq { m }`)。[検索](search.md#量子化による高速化) 参照 |
+| `opq` | false | PQ の前に直交回転を学習する (OPQ)。`quantization = Pq` のときのみ有効 |
+| `index` | `Hnsw` | 主索引の種類 (`Hnsw` / `Ivf` / `IvfPq`)。HNSW と IVF は排他 |
+| `nprobe` | 8 | IVF / IVF-PQ で走査するクラスタ数の既定値。`.nprobe(n)` で上書き可 |
 | `search_threads` | 0 (自動 = 論理コア数) | セグメント並列検索の並列度。1 で逐次。プールは Database 全体で共有され、初回の複数セグメント検索まで worker は起動しない |
 
 ## SyncPolicy
@@ -43,6 +49,23 @@ open 時に `InvalidConfig` エラーになります。
 `Batch` は fsync 完了まで呼び出し元に Ok を返さないため耐久性は Always と
 同等です。複数スレッドから同時に書き込む場合に効果があります
 (単一スレッドでは Always と同じ)。
+
+## 索引と量子化の組み合わせ
+
+`index` と `quantization` は次の 5 通りのみ許可されます (他は open 時に
+`InvalidConfig`)。`opq` は `Pq` の 2 行でのみ `true` にできます。
+
+| `index` | `quantization` | 書かれるファイル | 探索 |
+|---|---|---|---|
+| `Hnsw` | `None` | hnsw.bin | f32 HNSW (既定) |
+| `Hnsw` | `Sq8` | hnsw.bin + vectors_sq8.bin | SQ8 距離で HNSW → f32 再ランク |
+| `Hnsw` | `Pq { m }` | hnsw.bin + vectors_pq.bin (+ opq.bin) | ADC 距離で HNSW → f32 再ランク |
+| `Ivf` | `None` | ivf.bin | nprobe クラスタを Flat 走査 |
+| `IvfPq` | `Pq { m }` | ivfpq.bin (+ opq.bin) | nprobe クラスタを残差 ADC → f32 再ランク |
+
+`Pq { m }` の `m` はサブベクトル数で、`None` なら次元から自動決定します
+(`dim` の約数のうち `dim/m ≥ 4` かつ `m ≤ 96` の最大値。dim=128 → m=32)。
+詳細は [量子化とクラスタリング索引の設計](https://github.com/Moto1829/hamane-db/blob/main/docs/design/quantization.md)。
 
 ## HnswParams
 
