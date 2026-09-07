@@ -14,7 +14,8 @@ use std::time::Instant;
 
 use clap::Parser;
 use hamane::{
-    CollectionConfig, Database, IndexKind, Metric, Quantization, Record, StoreOptions, SyncPolicy,
+    CollectionConfig, Database, IndexKind, Metric, OpqRotation, Quantization, Record, StoreOptions,
+    SyncPolicy,
 };
 
 #[derive(Parser)]
@@ -49,7 +50,8 @@ struct Args {
     /// HNSW 構築スレッド数 (0 = 自動)
     #[arg(long, default_value_t = 0)]
     build_threads: usize,
-    /// 索引/量子化構成: f32 | sq8 | pq | ivf | ivfpq (todo 1006)
+    /// 索引/量子化構成: f32 | sq8 | pq | opq | ivf | ivfpq | ivfopq
+    /// (todo 1006 / 1104)
     #[arg(long, default_value = "f32")]
     config: String,
     /// PQ / IVF-PQ のサブベクトル数 m (省略時は dim から自動決定)
@@ -58,17 +60,25 @@ struct Args {
     /// IVF / IVF-PQ の nprobe スイープ (カンマ区切り)
     #[arg(long, default_value = "1,8,16,32,64")]
     nprobe: String,
+    /// base/query に固定の乱数直交回転を掛けてから投入する (todo 1104)。
+    /// 「次元の並びに意味がないデータ」(多くの埋め込みモデル) を模擬する。
+    /// 直交変換は距離を保存するので正解 (groundtruth) は変わらない
+    #[arg(long)]
+    rotate_input: bool,
 }
 
-/// `--config` から (IndexKind, quantization) を作る。
-fn parse_config(config: &str, pq_m: Option<usize>) -> (IndexKind, Option<Quantization>) {
+/// `--config` から (IndexKind, quantization, opq) を作る。
+fn parse_config(config: &str, pq_m: Option<usize>) -> (IndexKind, Option<Quantization>, bool) {
     match config {
-        "f32" => (IndexKind::Hnsw, None),
-        "sq8" => (IndexKind::Hnsw, Some(Quantization::Sq8)),
-        "pq" => (IndexKind::Hnsw, Some(Quantization::Pq { m: pq_m })),
-        "ivf" => (IndexKind::Ivf, None),
-        "ivfpq" => (IndexKind::IvfPq, Some(Quantization::Pq { m: pq_m })),
-        other => panic!("unknown --config '{other}' (f32|sq8|pq|ivf|ivfpq)"),
+        "f32" => (IndexKind::Hnsw, None, false),
+        "sq8" => (IndexKind::Hnsw, Some(Quantization::Sq8), false),
+        "pq" => (IndexKind::Hnsw, Some(Quantization::Pq { m: pq_m }), false),
+        // opq / ivfopq は PQ に直交回転を足した構成 (todo 1104)
+        "opq" => (IndexKind::Hnsw, Some(Quantization::Pq { m: pq_m }), true),
+        "ivf" => (IndexKind::Ivf, None, false),
+        "ivfpq" => (IndexKind::IvfPq, Some(Quantization::Pq { m: pq_m }), false),
+        "ivfopq" => (IndexKind::IvfPq, Some(Quantization::Pq { m: pq_m }), true),
+        other => panic!("unknown --config '{other}' (f32|sq8|pq|opq|ivf|ivfpq|ivfopq)"),
     }
 }
 
@@ -157,9 +167,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     eprintln!("loading dataset from {} ...", args.data.display());
-    let base = read_fvecs(&args.data.join("sift_base.fvecs"), args.limit)?;
-    let queries = read_fvecs(&args.data.join("sift_query.fvecs"), args.queries)?;
+    let mut base = read_fvecs(&args.data.join("sift_base.fvecs"), args.limit)?;
+    let mut queries = read_fvecs(&args.data.join("sift_query.fvecs"), args.queries)?;
     let dim = base.first().map(|v| v.len()).unwrap_or(0);
+    if args.rotate_input {
+        // 固定の乱数直交回転。直交変換は距離を保存するので正解は変わらないが、
+        // 「次元の並びに意味がある」構造 (SIFT のセル構造) は失われる
+        let r = OpqRotation::random_for_bench(dim, 0xB00C);
+        for v in base.iter_mut().chain(queries.iter_mut()) {
+            *v = r.apply(v);
+        }
+        eprintln!("input rotated by a fixed random orthogonal matrix");
+    }
+    let (base, queries) = (base, queries);
     eprintln!(
         "base: {} vectors, dim {}, queries: {}",
         base.len(),
@@ -189,7 +209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if db_dir.exists() {
         std::fs::remove_dir_all(&db_dir)?;
     }
-    let (index, quantization) = parse_config(&args.config, args.pq_m);
+    let (index, quantization, opq) = parse_config(&args.config, args.pq_m);
     let db = Database::open_with_options(
         &db_dir,
         StoreOptions {
@@ -203,6 +223,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             index,
             quantization,
+            opq,
             ..Default::default()
         },
     )?;

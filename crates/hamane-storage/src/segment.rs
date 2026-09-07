@@ -9,6 +9,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use hamane_core::opq::OpqRotation;
 use hamane_core::pq::{self, PqCodebook};
 use hamane_core::{dot_scalar, l2_squared_scalar, Id, Metadata, Metric, Result};
 use hamane_index::{HnswBuilder, HnswGraph, HnswParams, HnswView, VectorSource};
@@ -16,7 +17,7 @@ use memmap2::Mmap;
 
 use crate::format::{
     self, corrupted, put_metadata, read_metadata, Reader, MAGIC_HNSW, MAGIC_IDS, MAGIC_IVF,
-    MAGIC_IVFPQ, MAGIC_META, MAGIC_PQ, MAGIC_SQ8, MAGIC_TOMBSTONES, MAGIC_VECTORS,
+    MAGIC_IVFPQ, MAGIC_META, MAGIC_OPQ, MAGIC_PQ, MAGIC_SQ8, MAGIC_TOMBSTONES, MAGIC_VECTORS,
 };
 use crate::memtable::MemtableSnapshot;
 
@@ -26,6 +27,7 @@ const SQ8_HEADER_LEN: usize = 64; // magic[8] + dim u32 + count u64 + min f32 + 
 const PQ_HEADER_LEN: usize = 64; // magic[8] + dim u32 + count u64 + m u32 + nbits u8 + ksub u32 + pad
 const IVF_HEADER_LEN: usize = 64; // magic[8] + dim u32 + count u64 + nlist u32 + pad
 const IVFPQ_HEADER_LEN: usize = 64; // magic[8] + dim u32 + count u64 + nlist u32 + m u32 + nbits u8 + ksub u32 + pad
+const OPQ_HEADER_LEN: usize = 64; // magic[8] + dim u32 + pad
 
 /// IVF 粗量子化の目安点数/クラスタ (これ未満なら nlist を縮小する)。
 const IVF_MIN_PER_LIST: usize = 39;
@@ -39,6 +41,7 @@ pub const FILE_SQ8: &str = "vectors_sq8.bin";
 pub const FILE_PQ: &str = "vectors_pq.bin";
 pub const FILE_IVF: &str = "ivf.bin";
 pub const FILE_IVFPQ: &str = "ivfpq.bin";
+pub const FILE_OPQ: &str = "opq.bin";
 
 /// フラッシュ時の量子化方式 (docs/design/quantization.md §5)。
 /// HNSW 探索の 1 段目を量子化距離で行い、f32 で再ランクして精度を保つ。
@@ -75,6 +78,9 @@ pub struct IndexBuildSpec {
     /// 量子化ベクトルも書く (None = f32 のみ)。HNSW 探索の距離計算を量子化し、
     /// f32 再ランクと組み合わせて使う (docs/design/quantization.md)
     pub quantization: Option<Quantization>,
+    /// PQ コードブックの前に直交回転を学習する (OPQ, todo 1103)。
+    /// quantization = Pq のときのみ意味を持つ (docs/design/opq.md §4)
+    pub opq: bool,
 }
 
 /// count 件のセグメントに対する IVF のクラスタ数を決める。
@@ -228,7 +234,7 @@ impl SegmentWriter {
                             Some(Quantization::Pq { m }) => m,
                             _ => None,
                         };
-                        Self::write_ivfpq(&tmp_dir, seg_id, m, &rows, dim, count)?
+                        Self::write_ivfpq(&tmp_dir, seg_id, m, spec.opq, &rows, dim, count)?
                     }
                 }
             }
@@ -243,6 +249,34 @@ impl SegmentWriter {
             record_count: count,
             tombstone_count: tombstones.len() as u64,
         })
+    }
+
+    /// OPQ 回転を学習して opq.bin を書き、回転後のベクトルを返す (todo 1103)。
+    ///
+    /// `opq = false` なら `None` (従来 PQ)。学習は縮退入力でも恒等行列に
+    /// フォールバックするので、呼び出し側は失敗を気にしなくてよい。
+    fn train_opq(
+        tmp_dir: &Path,
+        opq: bool,
+        seg_id: u64,
+        m: usize,
+        vecs: &[&[f32]],
+        dim: usize,
+    ) -> Result<Option<Vec<Vec<f32>>>> {
+        if !opq {
+            return Ok(None);
+        }
+        // seed はセグメント ID で決定的に (コードブック・HNSW と同様)
+        let rotation = OpqRotation::train(vecs, dim, m, seg_id)?;
+        let rotated: Vec<Vec<f32>> = vecs.iter().map(|v| rotation.apply(v)).collect();
+
+        let mut buf = Vec::with_capacity(OPQ_HEADER_LEN + dim * dim * 4);
+        buf.extend_from_slice(&MAGIC_OPQ);
+        format::put_u32(&mut buf, dim as u32);
+        buf.resize(OPQ_HEADER_LEN, 0);
+        format::put_f32_slice(&mut buf, rotation.matrix());
+        write_file_with_crc(&tmp_dir.join(FILE_OPQ), &buf)?;
+        Ok(Some(rotated))
     }
 
     /// hnsw.bin (+ 任意の量子化ベクトル) を書く。
@@ -289,9 +323,22 @@ impl SegmentWriter {
                     .or_else(|| pq::choose_m(dim as usize));
                 if let Some(m) = m {
                     let vecs: Vec<&[f32]> = rows.iter().map(|(_, v, _)| *v).collect();
+                    // OPQ (todo 1103): 回転を学習して opq.bin を書き、以降は
+                    // 回転後空間で符号化する。回転は L2/内積を保存するので
+                    // 探索側はクエリを同じ行列で回すだけでよい
+                    let rotated =
+                        Self::train_opq(tmp_dir, spec.opq, seg_id, m, &vecs, dim as usize)?;
+                    let rotated_slices: Vec<&[f32]>;
+                    let data: &[&[f32]] = match &rotated {
+                        Some(r) => {
+                            rotated_slices = r.iter().map(|v| v.as_slice()).collect();
+                            &rotated_slices
+                        }
+                        None => &vecs,
+                    };
                     // seed はセグメント ID で決定的に (HNSW と同様)
                     let codebook = PqCodebook::train(
-                        &vecs,
+                        data,
                         dim as usize,
                         m,
                         seg_id,
@@ -308,7 +355,7 @@ impl SegmentWriter {
                     format::put_u32(&mut buf, pq::KSUB as u32);
                     buf.resize(PQ_HEADER_LEN, 0);
                     format::put_f32_slice(&mut buf, cb);
-                    for (_, vector, _) in rows {
+                    for vector in data {
                         codebook.encode(vector, &mut buf);
                     }
                     write_file_with_crc(&tmp_dir.join(FILE_PQ), &buf)?;
@@ -367,10 +414,12 @@ impl SegmentWriter {
     /// ivfpq.bin (粗セントロイド + 残差 PQ コードブック + CSR(entries+codes)) を
     /// 書く (todo 1005)。各行を所属クラスタの粗セントロイドを引いた残差として
     /// PQ 符号化する (IVFADC)。m が解決できなければ通常 IVF にフォールバック。
+    #[allow(clippy::too_many_arguments)]
     fn write_ivfpq(
         tmp_dir: &Path,
         seg_id: u64,
         m: Option<usize>,
+        opq: bool,
         rows: &[(Id, &[f32], &Metadata)],
         dim: u32,
         count: u64,
@@ -386,16 +435,27 @@ impl SegmentWriter {
         };
 
         let vecs: Vec<&[f32]> = rows.iter().map(|(_, v, _)| *v).collect();
+        // OPQ (todo 1103): 粗量子化も残差 PQ も回転後空間で行う。回転は L2 を
+        // 保存するので粗セントロイドの意味は変わらない
+        let rotated = Self::train_opq(tmp_dir, opq, seg_id, m, &vecs, d)?;
+        let rotated_slices: Vec<&[f32]>;
+        let data: &[&[f32]] = match &rotated {
+            Some(r) => {
+                rotated_slices = r.iter().map(|v| v.as_slice()).collect();
+                &rotated_slices
+            }
+            None => &vecs,
+        };
         let nlist = choose_nlist(rows.len());
         // 粗 k-means → 各行の所属リスト
-        let sample = pq::subsample(&vecs, pq::DEFAULT_TRAIN_SAMPLE);
+        let sample = pq::subsample(data, pq::DEFAULT_TRAIN_SAMPLE);
         let centroids = pq::kmeans(&sample, d, nlist, seg_id, pq::DEFAULT_MAX_ITER);
-        let assign: Vec<u32> = vecs
+        let assign: Vec<u32> = data
             .iter()
             .map(|v| pq::nearest(v, &centroids, d, nlist))
             .collect();
         // 残差 r = x − centroid[list]
-        let residuals: Vec<Vec<f32>> = vecs
+        let residuals: Vec<Vec<f32>> = data
             .iter()
             .enumerate()
             .map(|(i, v)| {
@@ -534,6 +594,9 @@ pub struct Segment {
     /// ivfpq.bin (存在する場合のみ、todo 1005)。粗セントロイド + 残差 PQ
     /// コードブックは open 時に復元、CSR (offsets/entries/codes) は mmap のまま
     ivfpq: Option<IvfPqSegment>,
+    /// opq.bin (存在する場合のみ、todo 1103)。PQ / IVF-PQ のコードが回転後
+    /// 空間で符号化されていることを意味する。探索時はクエリを同じ行列で回す
+    opq: Option<OpqSegment>,
 }
 
 /// IVF-PQ の保持物。粗セントロイドと残差 PQ コードブックは owned、
@@ -710,6 +773,39 @@ impl PqView<'_> {
     pub fn distance_key(&self, lut: &[f32], row: u32) -> f32 {
         self.codebook.distance_key(lut, self.code(row))
     }
+}
+
+/// opq.bin を読み、ヘッダ・CRC・直交性を検証して回転行列を復元する (todo 1103)。
+///
+/// 行列は d×d と小さく検索のたびに全要素を使うので、mmap 参照ではなく
+/// owned で持つ (コードブック・粗セントロイドと同じ方針)。
+fn load_opq(path: &Path, seg_dim: usize) -> Result<OpqSegment> {
+    let mapped = MappedFile::open(path, &MAGIC_OPQ)?;
+    let content = mapped.content();
+    if content.len() < OPQ_HEADER_LEN {
+        return Err(corrupted("opq header too short"));
+    }
+    let dim = u32::from_le_bytes(content[8..12].try_into().unwrap()) as usize;
+    if dim != seg_dim {
+        return Err(corrupted("opq dim mismatch with segment"));
+    }
+    if content.len() != OPQ_HEADER_LEN + dim * dim * 4 {
+        return Err(corrupted("opq data size mismatch"));
+    }
+    let mut r = Vec::with_capacity(dim * dim);
+    for chunk in content[OPQ_HEADER_LEN..].as_chunks::<4>().0 {
+        r.push(f32::from_le_bytes(*chunk));
+    }
+    // from_matrix が直交性 (‖RᵀR − I‖ < 1e-3) を検証する
+    let rotation = OpqRotation::from_matrix(dim, r)?;
+    Ok(OpqSegment { rotation, mapped })
+}
+
+/// OPQ 回転の保持物。行列は owned、`mapped` は CRC 検証 (`verify_checksums`)
+/// のために保持する。
+struct OpqSegment {
+    rotation: OpqRotation,
+    mapped: MappedFile,
 }
 
 /// vectors_pq.bin を mmap で開き、ヘッダ検証とコードブック復元を行う。
@@ -982,6 +1078,13 @@ impl Segment {
             None
         };
 
+        // opq.bin (任意): PQ / IVF-PQ のコードが回転後空間であることを示す
+        let opq = if dir.join(FILE_OPQ).exists() {
+            Some(load_opq(&dir.join(FILE_OPQ), dim)?)
+        } else {
+            None
+        };
+
         // 各ファイルの count・サイズ整合
         if ids.u64_at(8)? as usize != count || meta.u64_at(8)? as usize != count {
             return Err(corrupted("count mismatch across segment files"));
@@ -1022,6 +1125,7 @@ impl Segment {
             pq,
             ivf,
             ivfpq,
+            opq,
         };
         // hnsw.bin / vectors_sq8.bin があれば構造を一度検証しておく (行数の整合含む)。
         // vectors_pq.bin は load_pq 内で検証済み
@@ -1083,6 +1187,19 @@ impl Segment {
         })
     }
 
+    /// OPQ の回転行列 (opq.bin が無ければ None、todo 1103)。
+    ///
+    /// `Some` なら PQ / IVF-PQ のコードは回転後空間なので、探索側は
+    /// クエリを `apply` で回してから LUT を組む必要がある。
+    pub fn opq(&self) -> Option<&OpqRotation> {
+        self.opq.as_ref().map(|x| &x.rotation)
+    }
+
+    /// このセグメントが OPQ 回転を持つか。
+    pub fn has_opq(&self) -> bool {
+        self.opq.is_some()
+    }
+
     /// このセグメントが IVF-PQ を持つか。
     pub fn has_ivfpq(&self) -> bool {
         self.ivfpq.is_some()
@@ -1137,6 +1254,9 @@ impl Segment {
         }
         if let Some(ivf) = &self.ivf {
             ivf.mapped.verify_checksum(FILE_IVF)?;
+        }
+        if let Some(o) = &self.opq {
+            o.mapped.verify_checksum(FILE_OPQ)?;
         }
         if let Some(x) = &self.ivfpq {
             x.mapped.verify_checksum(FILE_IVFPQ)?;

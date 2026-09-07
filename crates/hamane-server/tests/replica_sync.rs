@@ -168,3 +168,85 @@ async fn replica_survives_restart_mid_stream() {
     sync(&mut s);
     assert_eq!(replica.collection("docs").unwrap().len(), 2);
 }
+
+/// 索引・量子化ファイル (todos 1003〜1005, 1103) もレプリカへ同期されること。
+/// M9 の同期対象は hnsw.bin / vectors_sq8.bin だけだったため、PQ や IVF の
+/// セグメントではレプリカが Flat 検索に退化していた (回帰防止)。
+#[tokio::test(flavor = "multi_thread")]
+async fn index_and_quantization_files_are_replicated() {
+    use hamane::{Quantization, StoreOptions};
+
+    let primary_dir = tempfile::tempdir().unwrap();
+    let replica_dir = tempfile::tempdir().unwrap();
+
+    let primary = Arc::new(
+        Database::open_with_options(
+            primary_dir.path(),
+            StoreOptions {
+                hnsw_min_rows: 8,
+                quantization: Some(Quantization::Pq { m: Some(2) }),
+                opq: true,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
+    let col = primary
+        .create_collection(
+            "docs",
+            CollectionConfig {
+                dim: 4,
+                metric: Metric::L2,
+            },
+        )
+        .unwrap();
+    for i in 0..500u64 {
+        col.upsert(Record::new(i, vec4(i as f32))).unwrap();
+    }
+    primary.flush().unwrap();
+    let base = serve_primary(Arc::clone(&primary)).await;
+
+    let replica = Arc::new(Database::open_replica(replica_dir.path(), Default::default()).unwrap());
+    let mut s = ReplicaSync::new(base, Some(KEY.into()), Arc::clone(&replica));
+    sync(&mut s);
+
+    // セグメントディレクトリに量子化・回転ファイルが揃っている
+    let mut found: Vec<String> = Vec::new();
+    let mut stack = vec![replica_dir.path().to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                found.push(name.to_string());
+            }
+        }
+    }
+    for want in ["vectors_pq.bin", "opq.bin", "hnsw.bin"] {
+        assert!(
+            found.iter().any(|f| f == want),
+            "{want} must be replicated, got {found:?}"
+        );
+    }
+
+    // レプリカでも検索できる (回転行列が揃っているので結果は primary と一致)
+    let rcol = replica.collection("docs").unwrap();
+    let hits: Vec<u64> = rcol
+        .search(&vec4(42.0))
+        .k(3)
+        .run()
+        .unwrap()
+        .iter()
+        .map(|h| h.id)
+        .collect();
+    let want: Vec<u64> = col
+        .search(&vec4(42.0))
+        .k(3)
+        .run()
+        .unwrap()
+        .iter()
+        .map(|h| h.id)
+        .collect();
+    assert_eq!(hits, want);
+}

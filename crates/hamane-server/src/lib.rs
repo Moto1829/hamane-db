@@ -608,14 +608,19 @@ async fn replication_segment(
     Path((collection_id, seg_id, file)): Path<(u32, u64, String)>,
 ) -> Result<Vec<u8>, ApiError> {
     use hamane_storage::segment as seg;
-    // パストラバーサル防止: セグメント構成ファイル名のみ許可
-    const ALLOWED: [&str; 6] = [
+    // パストラバーサル防止: セグメント構成ファイル名のみ許可。
+    // 索引・量子化ファイル (todos 1003〜1005, 1103) も同期対象に含める
+    const ALLOWED: [&str; 10] = [
         seg::FILE_VECTORS,
         seg::FILE_IDS,
         seg::FILE_META,
         seg::FILE_TOMBSTONES,
         seg::FILE_HNSW,
         seg::FILE_SQ8,
+        seg::FILE_PQ,
+        seg::FILE_IVF,
+        seg::FILE_IVFPQ,
+        seg::FILE_OPQ,
     ];
     if !ALLOWED.contains(&file.as_str()) {
         return Err(ApiError(

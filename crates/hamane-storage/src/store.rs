@@ -45,6 +45,10 @@ pub struct StoreOptions {
     pub quantization: Option<Quantization>,
     /// 主索引の種類 (todo 1004)。Hnsw (既定) か Ivf。HNSW と IVF は排他
     pub index: IndexKind,
+    /// PQ コードブックの前に直交回転を学習する (OPQ, todo 1103)。
+    /// `quantization = Some(Pq)` のときのみ有効 (docs/design/opq.md §4)。
+    /// 構築は遅くなるが、同じ m でより低い量子化誤差 = 高い recall が得られる
+    pub opq: bool,
     /// IVF 検索でクエリごとに走査するクラスタ数の既定値 (検索時に上書き可)。
     /// 大きいほど再現率が上がり遅くなる。IndexKind::Ivf のときのみ有効
     pub nprobe: usize,
@@ -63,6 +67,7 @@ impl Default for StoreOptions {
             hnsw_min_rows: 1024,
             compaction_threshold: 4,
             quantization: None,
+            opq: false,
             index: IndexKind::Hnsw,
             nprobe: 8,
             search_threads: 0,
@@ -104,6 +109,10 @@ impl StoreOptions {
                 return bad("IndexKind::IvfPq requires quantization = Some(Quantization::Pq)");
             }
             _ => {}
+        }
+        // OPQ は PQ のコードブック学習の前段なので、PQ 以外との併用は無意味
+        if self.opq && !matches!(self.quantization, Some(Quantization::Pq { .. })) {
+            return bad("opq requires quantization = Some(Quantization::Pq)");
         }
         if self.nprobe == 0 {
             return bad("nprobe must be >= 1");
@@ -1317,6 +1326,7 @@ impl Shared {
                 min_rows: self.options.hnsw_min_rows,
                 index: self.options.index,
                 quantization: self.options.quantization,
+                opq: self.options.opq,
             };
             let meta = SegmentWriter::write(&dir, *seg_id, memtable, Some(spec))?;
             entries.push((
@@ -1482,6 +1492,7 @@ impl Shared {
                 min_rows: self.options.hnsw_min_rows,
                 index: self.options.index,
                 quantization: self.options.quantization,
+                opq: self.options.opq,
             };
             SegmentWriter::write(&dir, seg_id, &merged.snapshot(), Some(spec))?;
             Some(SegmentEntry {
@@ -2151,6 +2162,17 @@ mod tests {
             // nprobe = 0 は不可
             StoreOptions {
                 nprobe: 0,
+                ..Default::default()
+            },
+            // OPQ は PQ 以外と併用不可 (todo 1103)
+            StoreOptions {
+                opq: true,
+                quantization: None,
+                ..Default::default()
+            },
+            StoreOptions {
+                opq: true,
+                quantization: Some(Quantization::Sq8),
                 ..Default::default()
             },
         ];

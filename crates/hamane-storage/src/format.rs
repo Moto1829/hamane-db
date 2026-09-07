@@ -17,6 +17,7 @@ pub const MAGIC_SQ8: [u8; 8] = *b"HAMANEQ\x01";
 pub const MAGIC_PQ: [u8; 8] = *b"HAMANEP\x01"; // 直積量子化 (todo 1003)
 pub const MAGIC_IVF: [u8; 8] = *b"HAMANEC\x01"; // IVF 転置ファイル / 粗量子化 (todo 1004)
 pub const MAGIC_IVFPQ: [u8; 8] = *b"HAMANEG\x01"; // IVF-PQ 残差量子化 (todo 1005)
+pub const MAGIC_OPQ: [u8; 8] = *b"HAMANEO\x01"; // OPQ 回転行列 (todo 1103)
 
 pub fn corrupted(msg: impl Into<String>) -> HamaneError {
     HamaneError::Corrupted(msg.into())

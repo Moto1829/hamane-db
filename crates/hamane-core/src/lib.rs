@@ -6,6 +6,7 @@
 mod error;
 mod filter;
 mod metric;
+pub mod opq;
 pub mod pq;
 mod record;
 pub mod sq8;

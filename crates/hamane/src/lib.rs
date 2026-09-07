@@ -31,6 +31,7 @@ mod pool;
 
 pub use collection::{Collection, CollectionConfig, SearchBuilder, SearchHit};
 pub use database::Database;
+pub use hamane_core::opq::OpqRotation;
 pub use hamane_core::{
     Filter, HamaneError, Id, MetaValue, Metadata, Metric, Record, RecordId, Result, EXT_ID_BASE,
     EXT_ID_META_KEY,

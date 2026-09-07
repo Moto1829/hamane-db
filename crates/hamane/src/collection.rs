@@ -358,10 +358,14 @@ impl SegmentSearch {
                 Some(_) => Some(seg.decode_all_metadata()?),
                 None => None,
             };
+            // OPQ (todo 1103): コードが回転後空間なので粗量子化・ADC には
+            // 回転したクエリを使う。再ランクは生 f32 のままでよい
+            let rotated = seg.opq().map(|r| r.apply(query));
+            let q = rotated.as_deref().unwrap_or(query);
             // (ADC 距離キー, row) を probe リストから集める
             let mut cand: Vec<(f32, u32)> = Vec::new();
-            for l in ivfpq.nprobe_lists(query, self.nprobe) {
-                let (lut, bias) = ivfpq.build_list_lut(query, l, metric);
+            for l in ivfpq.nprobe_lists(q, self.nprobe) {
+                let (lut, bias) = ivfpq.build_list_lut(q, l, metric);
                 for i in ivfpq.list_range(l) {
                     let row = ivfpq.entry(i);
                     if !live(row) {
@@ -426,7 +430,10 @@ impl SegmentSearch {
                 ));
             }
             if let Some(pq) = seg.pq_view() {
-                let lut = pq.build_lut(query, metric);
+                // OPQ (todo 1103): 回転後空間のコードなのでクエリを回してから
+                // LUT を組む。再ランクは生 f32 のまま (two_stage_search)
+                let rotated = seg.opq().map(|r| r.apply(query));
+                let lut = pq.build_lut(rotated.as_deref().unwrap_or(query), metric);
                 let dist = |row: u32| -> f32 { pq.distance_key(&lut, row) };
                 return Ok(two_stage_search(
                     &hview, n, &dist, &live, seg, query, k, ef, metric,

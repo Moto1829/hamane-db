@@ -159,7 +159,16 @@ impl ReplicaSync {
                     segment::FILE_META,
                     segment::FILE_TOMBSTONES,
                 ];
-                let optional = [segment::FILE_HNSW, segment::FILE_SQ8];
+                // 索引・量子化ファイルはセグメントごとに有無が異なる
+                // (HNSW / IVF は排他、量子化は opt-in)。全て任意扱いで取りに行く
+                let optional = [
+                    segment::FILE_HNSW,
+                    segment::FILE_SQ8,
+                    segment::FILE_PQ,
+                    segment::FILE_IVF,
+                    segment::FILE_IVFPQ,
+                    segment::FILE_OPQ,
+                ];
                 for file in required.iter().chain(&optional) {
                     let dest = seg_dir.join(file);
                     if dest.exists() {
@@ -171,7 +180,7 @@ impl ReplicaSync {
                     );
                     match self.get(&url) {
                         Ok(bytes) => write_durable(&dest, &bytes)?,
-                        // hnsw / sq8 はセグメントに存在しないことがある
+                        // 索引・量子化ファイルは存在しないことがある
                         Err(e)
                             if e.kind() == std::io::ErrorKind::NotFound
                                 && optional.contains(file) =>
