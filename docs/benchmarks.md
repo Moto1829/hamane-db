@@ -126,3 +126,40 @@ SIFT のような自然データでは OFF で構築 20% 高速・recall ほぼ�
   挿入の並列化 (ノード単位ロック) が最大の改善余地
 - extendCandidates 常時有効の構築コスト (距離計算 ~2 倍)。SIFT のような
   自然データではオフでも再現率が出る可能性があり、パラメータ化を検討
+
+## M10: 量子化とクラスタリング索引 (todos/1006)
+
+- 日付: 2026-09-03
+- 環境: Apple Silicon (aarch64) / macOS / rustc 1.93.0 / release / 単一スレッド
+- 実行: `cargo run --release -p hamane-bench -- --limit 200000 --queries 1000 --config <c>`
+- 構成: SIFT の先頭 n=200,000 (dim 128, L2)、クエリ 1,000 本、正解は総当たり
+- HNSW 既定パラメータ、単一セグメント。PQ は m=32 (dsub=4)、IVF は nlist≈447 (√n)
+
+各構成の代表点 (HNSW 系は ef、IVF 系は nprobe のスイープから recall≈0.99 付近):
+
+| 構成 | 索引 | recall@10 | QPS | 構築 | ディスク |
+|---|---|---|---|---|---|
+| f32 | HNSW | 0.9894 (ef=64) | 4799 | 32.9 s | 130 MB |
+| SQ8 | HNSW + SQ8 | 0.9894 (ef=64) | **9531** | 33.8 s | 154 MB |
+| PQ | HNSW + PQ | 0.9835 (ef=64) | 7043 | 89.2 s | 136 MB |
+| IVF | IVF | 0.9896 (nprobe=32) | 378 | 31.8 s | **104 MB** |
+| IVF-PQ | IVF + 残差PQ | 0.9852 (nprobe=32) | 728 | 86.5 s | 110 MB |
+
+読み取り:
+
+- **量子化 (SQ8/PQ) は HNSW 探索を高速化する。** 1 段目の距離計算が u8/表引きに
+  なり、SQ8 で QPS 約 2 倍、PQ で約 1.5 倍。recall は f32 再ランクでほぼ同等
+  (SQ8 は完全同等、PQ は僅かに低下)
+- **IVF は同 recall で HNSW より遅い** (200k では HNSW グラフの枝刈りが優秀)。
+  IVF の価値は構築の単純さと、億件規模でのメモリ特性。IVF-PQ は ADC の表引きで
+  IVF 比 QPS 約 2 倍
+- **ディスク**: 再ランク用に vectors.bin (512 B/行) を常に残すため、SQ8/PQ は
+  量子化ファイルが**加算**されディスクは増える。PQ の圧縮効果 (codes 32 B/行 =
+  f32 比 16x) が効くのは「探索時に走査する作業集合」であり、億件規模でこそ意味を
+  持つ。IVF は HNSW グラフ (~26 MB) を書かないぶんディスク最小
+- 構築時間: PQ / IVF-PQ はコードブック学習 (サブベクトル 32 本 × k-means) が
+  加わり f32 の約 2.7 倍。IVF (量子化なし) は粗 k-means のみで f32 と同等
+
+**結論**: 中規模・低レイテンシ重視なら HNSW+SQ8 が最良 (recall 同等・QPS 2倍)。
+メモリ制約が支配的な超大規模では PQ / IVF-PQ が作業集合を 16x 圧縮する。
+用途に応じて `StoreOptions.{index, quantization, nprobe}` で選択する。

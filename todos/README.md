@@ -180,5 +180,32 @@ M9 完了 (2026-07-18)。実装メモ:
   chunked 非対応 = 直結前提)
 - 902〜904 で結合テスト 4 本 + E2E 3 本 + follower 単体 5 本
 
+## M10: 量子化とクラスタリング索引 (2026-08-26 計画 / 2026-09-03 完了)
+
+設計: [docs/design/quantization.md](../docs/design/quantization.md)。
+PQ (直積量子化) → IVF (転置ファイル) → IVF-PQ (残差 PQ) を段階的に追加した。
+既存の SQ8 / HNSW とフォーマット互換を保ち、全て opt-in (既定 off)。
+量子化・索引ファイルは任意ファイルで、無ければ従来動作にフォールバック。
+
+| # | タスク | Depends |
+|---|---|---|
+| ✅ [1001](1001-quantization-design.md) | 設計文書 | — |
+| ✅ [1002](1002-pq-codebook.md) | PQ コードブック学習 (k-means, hamane-core/pq.rs) | 1001 |
+| ✅ [1003](1003-pq-segment-search.md) | PQ セグメント統合と ADC 2 段階検索 | 1002 |
+| ✅ [1004](1004-ivf-coarse.md) | IVF 粗量子化と nprobe 検索 | 1002 |
+| ✅ [1005](1005-ivf-pq.md) | IVF-PQ (residual PQ) 統合 | 1003, 1004 |
+| ✅ [1006](1006-quantization-bench.md) | 構成別ベンチとドキュメント | 1003, 1004, 1005 |
+
+M10 完了 (2026-09-03)。SIFT 200k 実測 (docs/benchmarks.md): SQ8 は recall 同等で
+QPS 約 2 倍、PQ は約 1.5 倍。IVF/IVF-PQ は全 recall 域で HNSW 系に劣る (200k では
+グラフ枝刈りが優秀) が、億件規模のメモリ削減用途向け。全構成 recall@10 ≥ 0.95。
+
+設計上の要点:
+- PQ は ADC の距離クロージャを既存 `search_hnsw_by` に渡すだけで統合でき、
+  hamane-index の変更ゼロ (SQ8 と同じ 2 段階検索・再ランク)
+- HNSW と IVF はどちらも枝刈り機構なので**セグメント単位で排他** (`IndexKind`)
+- k-means / コードブック処理は hamane-core/pq.rs に集約 (sq8.rs と対称)
+- 許可する index × quantization は 5 通りのみ (それ以外は open 時エラー)
+
 将来候補 (未タスク化): crates.io / PyPI 公開 (実装優先のため保留)、
-AVX2 SQ8 カーネル (x86_64 検証環境待ち)。
+AVX2 SQ8 カーネル (x86_64 検証環境待ち)、OPQ (回転付き PQ)。

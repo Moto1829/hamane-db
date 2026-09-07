@@ -3,7 +3,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use hamane_core::{normalize, Filter, HamaneError, Id, Metadata, Metric, Record, RecordId, Result};
-use hamane_index::{search_flat, search_hnsw};
+use hamane_index::{search_flat, search_hnsw, search_hnsw_by, HnswView};
 use hamane_storage::{LiveView, Segment, Store, StoredRecord};
 
 use crate::pool::SearchPool;
@@ -13,8 +13,9 @@ use crate::pool::SearchPool;
 const FILTER_SAMPLE_SIZE: usize = 1000;
 const PRE_FILTER_SELECTIVITY: f64 = 0.05;
 const MAX_OVERSAMPLE: f32 = 4.0;
-/// SQ8 の 2 段階検索で量子化距離により取得する候補の倍率 (todo 602)
-const SQ8_RERANK_FACTOR: usize = 4;
+/// 量子化 (SQ8/PQ) の 2 段階検索で、量子化距離により取得する候補の倍率
+/// (todo 602 / 1003)。この件数を f32 で再ランクして上位 k を返す
+const RERANK_FACTOR: usize = 4;
 
 /// Collection 作成時の設定。次元数と距離関数は作成後変更できない。
 #[derive(Debug, Clone, Copy)]
@@ -187,6 +188,7 @@ impl Collection {
             k: 10,
             filter: None,
             ef: None,
+            nprobe: None,
         }
     }
 
@@ -221,11 +223,13 @@ impl Collection {
         k: usize,
         filter: Option<&Filter>,
         ef: Option<usize>,
+        nprobe: Option<usize>,
     ) -> Result<Vec<SearchHit>> {
         let metric = self.config.metric;
         let query = self.prepare_vector(query.to_vec())?;
         let view: LiveView = self.store.view(self.collection_id)?;
         let ef = ef.unwrap_or(self.store.options().hnsw.ef_search);
+        let nprobe = nprobe.unwrap_or(self.store.options().nprobe);
 
         // (比較キー, id) を全ソースから収集。
         // rank: 0..memtables().len() が memtable 列 (active + フラッシュ待ち)、
@@ -248,6 +252,7 @@ impl Collection {
             query,
             k,
             ef,
+            nprobe,
             metric,
             filter: filter.cloned(),
         });
@@ -304,6 +309,8 @@ struct SegmentSearch {
     query: Vec<f32>,
     k: usize,
     ef: usize,
+    /// IVF セグメントで走査するクラスタ数 (HNSW セグメントでは未使用)
+    nprobe: usize,
     metric: Metric,
     filter: Option<Filter>,
 }
@@ -319,6 +326,66 @@ impl SegmentSearch {
         let filter = self.filter.as_ref();
         let n = seg.len() as u32;
         let live = |row: u32| view.is_live(seg.id(row), rank);
+
+        // IVF セグメント (HNSW と排他): nprobe クラスタの候補行だけを Flat 走査し、
+        // live 判定・フィルタを適用して距離計算する (docs/design/quantization.md §2.3)
+        if let Some(ivf) = seg.ivf_view() {
+            let metas = match filter {
+                Some(_) => Some(seg.decode_all_metadata()?),
+                None => None,
+            };
+            let mut hits: Vec<(f32, Id)> = Vec::new();
+            for row in ivf.candidate_rows(query, self.nprobe) {
+                if !live(row) {
+                    continue;
+                }
+                if let (Some(f), Some(metas)) = (filter, &metas) {
+                    if !f.matches(&metas[row as usize]) {
+                        continue;
+                    }
+                }
+                hits.push((metric.distance_key(query, seg.vector(row)), seg.id(row)));
+            }
+            hits.sort_by(|a, b| a.partial_cmp(b).expect("keys are finite"));
+            hits.truncate(k);
+            return Ok(hits);
+        }
+
+        // IVF-PQ セグメント (HNSW と排他): nprobe クラスタを残差 ADC で評価し、
+        // k×RERANK 候補を f32 で再ランクする (docs/design/quantization.md §3.2)
+        if let Some(ivfpq) = seg.ivfpq_view() {
+            let metas = match filter {
+                Some(_) => Some(seg.decode_all_metadata()?),
+                None => None,
+            };
+            // (ADC 距離キー, row) を probe リストから集める
+            let mut cand: Vec<(f32, u32)> = Vec::new();
+            for l in ivfpq.nprobe_lists(query, self.nprobe) {
+                let (lut, bias) = ivfpq.build_list_lut(query, l, metric);
+                for i in ivfpq.list_range(l) {
+                    let row = ivfpq.entry(i);
+                    if !live(row) {
+                        continue;
+                    }
+                    if let (Some(f), Some(metas)) = (filter, &metas) {
+                        if !f.matches(&metas[row as usize]) {
+                            continue;
+                        }
+                    }
+                    cand.push((bias + ivfpq.code_distance(&lut, i), row));
+                }
+            }
+            // 量子化距離で k×RERANK に絞り、f32 で再ランクして上位 k
+            cand.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("keys are finite"));
+            cand.truncate(k * RERANK_FACTOR);
+            let mut reranked: Vec<(f32, Id)> = cand
+                .iter()
+                .map(|&(_, row)| (metric.distance_key(query, seg.vector(row)), seg.id(row)))
+                .collect();
+            reranked.sort_by(|a, b| a.partial_cmp(b).expect("keys are finite"));
+            reranked.truncate(k);
+            return Ok(reranked);
+        }
 
         let flat_over =
             |rows: &mut dyn Iterator<Item = u32>, metas: Option<&[Metadata]>| -> Vec<(f32, Id)> {
@@ -347,30 +414,23 @@ impl SegmentSearch {
         };
 
         let Some(filter) = filter else {
-            // フィルタなし: live マスクのみで HNSW。
-            // SQ8 があれば量子化距離で k×RERANK 件探索し、f32 で再ランクする (todo 602)
+            // フィルタなし: live マスクのみで HNSW。量子化があれば量子化距離で
+            // k×RERANK 件探索し、f32 で再ランクする 2 段階検索 (todo 602 / 1003)
             if let Some(sq8) = seg.sq8_view()? {
                 let query_codes = sq8.quantize_query(query);
                 let code_sum: u64 = query_codes.iter().map(|&x| x as u64).sum();
                 let dist =
                     |row: u32| -> f32 { sq8.distance_key(metric, &query_codes, code_sum, row) };
-                let fetch = k * SQ8_RERANK_FACTOR;
-                let hits = hamane_index::search_hnsw_by(
-                    &hview,
-                    n,
-                    &dist,
-                    fetch,
-                    ef.max(fetch),
-                    Some(&live),
-                );
-                // f32 で再ランクして上位 k
-                let mut reranked: Vec<(f32, Id)> = hits
-                    .into_iter()
-                    .map(|(r, _)| (metric.distance_key(query, seg.vector(r)), seg.id(r)))
-                    .collect();
-                reranked.sort_by(|a, b| a.partial_cmp(b).expect("keys are finite"));
-                reranked.truncate(k);
-                return Ok(reranked);
+                return Ok(two_stage_search(
+                    &hview, n, &dist, &live, seg, query, k, ef, metric,
+                ));
+            }
+            if let Some(pq) = seg.pq_view() {
+                let lut = pq.build_lut(query, metric);
+                let dist = |row: u32| -> f32 { pq.distance_key(&lut, row) };
+                return Ok(two_stage_search(
+                    &hview, n, &dist, &live, seg, query, k, ef, metric,
+                ));
             }
             let hits = search_hnsw(&hview, seg, metric, query, k, ef, Some(&live));
             return Ok(hits.into_iter().map(|(r, key)| (key, seg.id(r))).collect());
@@ -420,6 +480,32 @@ impl SegmentSearch {
     }
 }
 
+/// 量子化距離で HNSW を k×RERANK 件辿り、f32 で再ランクして上位 k を返す
+/// 2 段階検索 (docs/design/quantization.md §1.3)。SQ8 と PQ で共通。
+/// `dist` は行の量子化距離キー、`live` は newest-wins の有効行判定。
+#[allow(clippy::too_many_arguments)]
+fn two_stage_search(
+    hview: &HnswView<'_>,
+    n: u32,
+    dist: &dyn Fn(u32) -> f32,
+    live: &dyn Fn(u32) -> bool,
+    seg: &Segment,
+    query: &[f32],
+    k: usize,
+    ef: usize,
+    metric: Metric,
+) -> Vec<(f32, Id)> {
+    let fetch = k * RERANK_FACTOR;
+    let hits = search_hnsw_by(hview, n, dist, fetch, ef.max(fetch), Some(live));
+    let mut reranked: Vec<(f32, Id)> = hits
+        .into_iter()
+        .map(|(r, _)| (metric.distance_key(query, seg.vector(r)), seg.id(r)))
+        .collect();
+    reranked.sort_by(|a, b| a.partial_cmp(b).expect("keys are finite"));
+    reranked.truncate(k);
+    reranked
+}
+
 /// 検索クエリのビルダー。
 pub struct SearchBuilder<'a> {
     collection: &'a Collection,
@@ -427,6 +513,7 @@ pub struct SearchBuilder<'a> {
     k: usize,
     filter: Option<Filter>,
     ef: Option<usize>,
+    nprobe: Option<usize>,
 }
 
 impl<'a> SearchBuilder<'a> {
@@ -449,9 +536,21 @@ impl<'a> SearchBuilder<'a> {
         self
     }
 
+    /// IVF の走査クラスタ数 nprobe を上書きする (既定は StoreOptions の値)。
+    /// 大きいほど再現率が上がり遅くなる。HNSW/Flat セグメントには影響しない。
+    pub fn nprobe(mut self, nprobe: usize) -> Self {
+        self.nprobe = Some(nprobe);
+        self
+    }
+
     /// 検索を実行し、近い順に返す。
     pub fn run(self) -> Result<Vec<SearchHit>> {
-        self.collection
-            .run_search(self.query, self.k, self.filter.as_ref(), self.ef)
+        self.collection.run_search(
+            self.query,
+            self.k,
+            self.filter.as_ref(),
+            self.ef,
+            self.nprobe,
+        )
     }
 }

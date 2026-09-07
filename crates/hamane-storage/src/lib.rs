@@ -12,6 +12,9 @@ pub mod wal;
 
 pub use manifest::{CollectionEntry, Manifest, SegmentEntry};
 pub use memtable::{Memtable, MemtableSnapshot, StoredRecord};
-pub use segment::{Segment, SegmentMeta, SegmentWriter, Sq8View};
+pub use segment::{
+    IndexKind, IvfPqView, IvfView, PqView, Quantization, Segment, SegmentMeta, SegmentWriter,
+    Sq8View,
+};
 pub use store::{CollectionInfo, LiveView, SegmentStats, Store, StoreOptions};
 pub use wal::{SyncPolicy, WalReader, WalRecord, WalWriter};

@@ -22,7 +22,9 @@ use hamane_index::HnswParams;
 use crate::format::corrupted;
 use crate::manifest::{CollectionEntry, Manifest, SegmentEntry, CURRENT_FILE};
 use crate::memtable::{Memtable, StoredRecord};
-use crate::segment::{segment_dir_name, IndexBuildSpec, Segment, SegmentWriter};
+use crate::segment::{
+    segment_dir_name, IndexBuildSpec, IndexKind, Quantization, Segment, SegmentWriter,
+};
 use crate::wal::{list_wal_files, wal_file_name, SyncPolicy, WalReader, WalRecord, WalWriter};
 
 /// Store の実行時オプション (manifest には永続化されない)。
@@ -37,9 +39,15 @@ pub struct StoreOptions {
     pub hnsw_min_rows: usize,
     /// collection のセグメント数がこの値以上になったら自動コンパクション
     pub compaction_threshold: usize,
-    /// SQ8 量子化 (todo 602)。有効にすると HNSW 探索の距離計算が u8 になり
-    /// メモリ帯域を節約する。結果は f32 で再ランクされ recall を保つ
-    pub sq8: bool,
+    /// 量子化方式 (todo 602 SQ8 / todo 1003 PQ)。有効にすると HNSW 探索の
+    /// 距離計算が量子化コードになりメモリ帯域を節約する。結果は f32 で
+    /// 再ランクされ recall を保つ。None = f32 のみ (既定)
+    pub quantization: Option<Quantization>,
+    /// 主索引の種類 (todo 1004)。Hnsw (既定) か Ivf。HNSW と IVF は排他
+    pub index: IndexKind,
+    /// IVF 検索でクエリごとに走査するクラスタ数の既定値 (検索時に上書き可)。
+    /// 大きいほど再現率が上がり遅くなる。IndexKind::Ivf のときのみ有効
+    pub nprobe: usize,
     /// セグメント並列検索の並列度 (todo 801)。0 = 自動 (論理コア数)、
     /// 1 = 逐次。プールは Database 全体で共有され、初回の複数セグメント
     /// 検索まで worker スレッドは起動しない
@@ -54,7 +62,9 @@ impl Default for StoreOptions {
             hnsw: HnswParams::default(),
             hnsw_min_rows: 1024,
             compaction_threshold: 4,
-            sq8: false,
+            quantization: None,
+            index: IndexKind::Hnsw,
+            nprobe: 8,
             search_threads: 0,
         }
     }
@@ -82,6 +92,21 @@ impl StoreOptions {
         }
         if h.ef_construction == 0 || h.ef_search == 0 {
             return bad("hnsw.ef_construction and hnsw.ef_search must be > 0");
+        }
+        // 許可する index × quantization は docs/design/quantization.md §5 の 5 通り。
+        match (self.index, self.quantization) {
+            // IVF (Flat 走査) は量子化と併用不可 (残差 PQ は IvfPq を使う)
+            (IndexKind::Ivf, Some(_)) => {
+                return bad("IndexKind::Ivf cannot be combined with quantization (use IvfPq)");
+            }
+            // IVF-PQ は残差 PQ が必須。None / Sq8 は不可
+            (IndexKind::IvfPq, q) if !matches!(q, Some(Quantization::Pq { .. })) => {
+                return bad("IndexKind::IvfPq requires quantization = Some(Quantization::Pq)");
+            }
+            _ => {}
+        }
+        if self.nprobe == 0 {
+            return bad("nprobe must be >= 1");
         }
         Ok(())
     }
@@ -1290,7 +1315,8 @@ impl Shared {
                 metric: *metric,
                 params: self.options.hnsw,
                 min_rows: self.options.hnsw_min_rows,
-                sq8: self.options.sq8,
+                index: self.options.index,
+                quantization: self.options.quantization,
             };
             let meta = SegmentWriter::write(&dir, *seg_id, memtable, Some(spec))?;
             entries.push((
@@ -1454,7 +1480,8 @@ impl Shared {
                 metric,
                 params: self.options.hnsw,
                 min_rows: self.options.hnsw_min_rows,
-                sq8: self.options.sq8,
+                index: self.options.index,
+                quantization: self.options.quantization,
             };
             SegmentWriter::write(&dir, seg_id, &merged.snapshot(), Some(spec))?;
             Some(SegmentEntry {
@@ -2101,6 +2128,29 @@ mod tests {
                     ef_search: 0,
                     ..Default::default()
                 },
+                ..Default::default()
+            },
+            // IVF は量子化と併用不可
+            StoreOptions {
+                index: IndexKind::Ivf,
+                quantization: Some(Quantization::Sq8),
+                ..Default::default()
+            },
+            // IVF-PQ は残差 PQ が必須 (None は不可)
+            StoreOptions {
+                index: IndexKind::IvfPq,
+                quantization: None,
+                ..Default::default()
+            },
+            // IVF-PQ に Sq8 は不可
+            StoreOptions {
+                index: IndexKind::IvfPq,
+                quantization: Some(Quantization::Sq8),
+                ..Default::default()
+            },
+            // nprobe = 0 は不可
+            StoreOptions {
+                nprobe: 0,
                 ..Default::default()
             },
         ];

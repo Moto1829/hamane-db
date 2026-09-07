@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::Parser;
-use hamane::{CollectionConfig, Database, Metric, Record, StoreOptions, SyncPolicy};
+use hamane::{
+    CollectionConfig, Database, IndexKind, Metric, Quantization, Record, StoreOptions, SyncPolicy,
+};
 
 #[derive(Parser)]
 #[command(name = "hamane-bench", about = "SIFT1M benchmark for hamane-db")]
@@ -47,6 +49,27 @@ struct Args {
     /// HNSW 構築スレッド数 (0 = 自動)
     #[arg(long, default_value_t = 0)]
     build_threads: usize,
+    /// 索引/量子化構成: f32 | sq8 | pq | ivf | ivfpq (todo 1006)
+    #[arg(long, default_value = "f32")]
+    config: String,
+    /// PQ / IVF-PQ のサブベクトル数 m (省略時は dim から自動決定)
+    #[arg(long)]
+    pq_m: Option<usize>,
+    /// IVF / IVF-PQ の nprobe スイープ (カンマ区切り)
+    #[arg(long, default_value = "1,8,16,32,64")]
+    nprobe: String,
+}
+
+/// `--config` から (IndexKind, quantization) を作る。
+fn parse_config(config: &str, pq_m: Option<usize>) -> (IndexKind, Option<Quantization>) {
+    match config {
+        "f32" => (IndexKind::Hnsw, None),
+        "sq8" => (IndexKind::Hnsw, Some(Quantization::Sq8)),
+        "pq" => (IndexKind::Hnsw, Some(Quantization::Pq { m: pq_m })),
+        "ivf" => (IndexKind::Ivf, None),
+        "ivfpq" => (IndexKind::IvfPq, Some(Quantization::Pq { m: pq_m })),
+        other => panic!("unknown --config '{other}' (f32|sq8|pq|ivf|ivfpq)"),
+    }
 }
 
 /// .fvecs: 各ベクトルが「次元数 d (i32 LE) + f32×d」の繰り返し。
@@ -60,8 +83,10 @@ fn read_fvecs(path: &Path, limit: usize) -> std::io::Result<Vec<Vec<f32>>> {
         let end = pos + d * 4;
         assert!(end <= buf.len(), "truncated fvecs file");
         let v: Vec<f32> = buf[pos..end]
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
         pos = end;
         out.push(v);
@@ -80,8 +105,10 @@ fn read_ivecs(path: &Path, limit: usize) -> std::io::Result<Vec<Vec<u32>>> {
         let end = pos + d * 4;
         assert!(end <= buf.len(), "truncated ivecs file");
         let v: Vec<u32> = buf[pos..end]
-            .chunks_exact(4)
-            .map(|c| i32::from_le_bytes(c.try_into().unwrap()) as u32)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| i32::from_le_bytes(*c) as u32)
             .collect();
         pos = end;
         out.push(v);
@@ -162,6 +189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if db_dir.exists() {
         std::fs::remove_dir_all(&db_dir)?;
     }
+    let (index, quantization) = parse_config(&args.config, args.pq_m);
     let db = Database::open_with_options(
         &db_dir,
         StoreOptions {
@@ -173,12 +201,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 build_threads: args.build_threads,
                 ..Default::default()
             },
+            index,
+            quantization,
             ..Default::default()
         },
     )?;
+    let is_ivf = matches!(index, IndexKind::Ivf | IndexKind::IvfPq);
     eprintln!(
-        "hnsw: extend_candidates={}, ef_construction={}, build_threads={}",
-        !args.no_extend, args.ef_construction, args.build_threads
+        "config={} (index={index:?}, quantization={quantization:?}), extend_candidates={}, ef_construction={}, build_threads={}",
+        args.config, !args.no_extend, args.ef_construction, args.build_threads
     );
     let col = db.create_collection(
         "sift",
@@ -208,35 +239,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ウォームアップ (mmap のページイン等を計測から外す)
     for q in queries.iter().take(200) {
-        col.search(q).k(args.k).ef(64).run()?;
+        if is_ivf {
+            col.search(q).k(args.k).nprobe(16).run()?;
+        } else {
+            col.search(q).k(args.k).ef(64).run()?;
+        }
     }
 
-    // ef スイープ
+    // 構成に応じて ef (HNSW) か nprobe (IVF) をスイープする
+    let build_label = if is_ivf {
+        "IVF 構築"
+    } else {
+        "フラッシュ+HNSW 構築"
+    };
     println!(
-        "\n## SIFT ベンチ結果 (n={}, queries={}, k={})\n",
+        "\n## SIFT ベンチ結果 config={} (n={}, queries={}, k={})\n",
+        args.config,
         base.len(),
         queries.len(),
         args.k
     );
     println!(
-        "- 挿入: {insert_secs:.1}s ({:.0} rec/s) / フラッシュ+HNSW 構築: {flush_secs:.1}s / ディスク: {disk_mb:.0} MB\n",
+        "- 挿入: {insert_secs:.1}s ({:.0} rec/s) / {build_label}: {flush_secs:.1}s / ディスク: {disk_mb:.0} MB\n",
         base.len() as f64 / insert_secs
     );
-    println!("| ef | recall@{} | QPS (1 thread) | mean latency |", args.k);
+    let (sweep_name, sweep) = if is_ivf {
+        ("nprobe", &args.nprobe)
+    } else {
+        ("ef", &args.ef)
+    };
+    println!(
+        "| {sweep_name} | recall@{} | QPS (1 thread) | mean latency |",
+        args.k
+    );
     println!("|---|---|---|---|");
-    for ef in args.ef.split(',') {
-        let ef: usize = ef.trim().parse()?;
+    for p in sweep.split(',') {
+        let p: usize = p.trim().parse()?;
         let started = Instant::now();
         let mut hit = 0usize;
         for (q, t) in queries.iter().zip(&truth) {
-            let hits = col.search(q).k(args.k).ef(ef).run()?;
+            let hits = if is_ivf {
+                col.search(q).k(args.k).nprobe(p).run()?
+            } else {
+                col.search(q).k(args.k).ef(p).run()?
+            };
             hit += hits.iter().filter(|h| t.contains(&(h.id as u32))).count();
         }
         let elapsed = started.elapsed().as_secs_f64();
         let recall = hit as f64 / (queries.len() * args.k) as f64;
         let qps = queries.len() as f64 / elapsed;
         println!(
-            "| {ef} | {recall:.4} | {qps:.0} | {:.2} ms |",
+            "| {p} | {recall:.4} | {qps:.0} | {:.2} ms |",
             elapsed * 1000.0 / queries.len() as f64
         );
     }

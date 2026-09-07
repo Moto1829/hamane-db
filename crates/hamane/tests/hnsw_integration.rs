@@ -1,7 +1,7 @@
 //! HNSW 統合テスト (todos/305–306): フラッシュで hnsw.bin が作られ、
 //! memtable (Flat) + セグメント (HNSW) のマージ検索が十分な再現率を持つこと。
 
-use hamane::{CollectionConfig, Database, Filter, Metric, Record, StoreOptions};
+use hamane::{CollectionConfig, Database, Filter, Metric, Quantization, Record, StoreOptions};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -224,7 +224,7 @@ fn sq8_two_stage_search_preserves_recall() {
         dir.path(),
         StoreOptions {
             hnsw_min_rows: 64,
-            sq8: true,
+            quantization: Some(Quantization::Sq8),
             ..Default::default()
         },
     )
@@ -277,7 +277,7 @@ fn sq8_two_stage_search_preserves_recall() {
         dir.path(),
         StoreOptions {
             hnsw_min_rows: 64,
-            sq8: true,
+            quantization: Some(Quantization::Sq8),
             ..Default::default()
         },
     )
@@ -287,6 +287,243 @@ fn sq8_two_stage_search_preserves_recall() {
     let hits = col.search(&q).k(5).run().unwrap();
     assert_eq!(hits.len(), 5);
     // 検索結果が f32 再ランク済み = score が正確な距離であること
+    let exact = Metric::L2
+        .distance_key(&q, &data[hits[0].id as usize].1)
+        .sqrt();
+    assert!(
+        (hits[0].score - exact).abs() < 1e-4,
+        "score must be exact f32 distance"
+    );
+}
+
+/// PQ 量子化 (todo 1003): 2 段階検索 (ADC 距離 → f32 再ランク) で recall を
+/// 保ちつつ、vectors_pq.bin が再 open 後も使われること。
+#[test]
+fn pq_two_stage_search_preserves_recall() {
+    let dir = tempfile::tempdir().unwrap();
+    let opts = || StoreOptions {
+        hnsw_min_rows: 64,
+        // m は None = dim から自動決定 (DIM=16 → m=4, dsub=4)
+        quantization: Some(Quantization::Pq { m: None }),
+        ..Default::default()
+    };
+    let db = Database::open_with_options(dir.path(), opts()).unwrap();
+    let col = db
+        .create_collection(
+            "docs",
+            CollectionConfig {
+                dim: DIM,
+                metric: Metric::L2,
+            },
+        )
+        .unwrap();
+
+    let mut rng = StdRng::seed_from_u64(1003);
+    let mut data = Vec::new();
+    let records: Vec<Record> = (0..3000u64)
+        .map(|i| {
+            let v = random_vec(&mut rng);
+            data.push((i, v.clone()));
+            Record::new(i, v)
+        })
+        .collect();
+    col.upsert_batch(records).unwrap();
+    col.flush().unwrap();
+
+    let mut total = 0.0;
+    let queries = 50;
+    for _ in 0..queries {
+        let q = random_vec(&mut rng);
+        let hits: Vec<u64> = col
+            .search(&q)
+            .k(10)
+            .run()
+            .unwrap()
+            .iter()
+            .map(|h| h.id)
+            .collect();
+        let truth = flat_topk(data.iter().map(|(i, v)| (*i, v)), &q, 10, |_| true);
+        total += recall(&hits, &truth);
+    }
+    let avg = total / queries as f64;
+    assert!(avg >= 0.95, "pq two-stage recall@10 = {avg:.3}");
+
+    // 再 open しても PQ 経路が生きている
+    drop(col);
+    drop(db);
+    let db = Database::open_with_options(dir.path(), opts()).unwrap();
+    let col = db.collection("docs").unwrap();
+    let q = random_vec(&mut rng);
+    let hits = col.search(&q).k(5).run().unwrap();
+    assert_eq!(hits.len(), 5);
+    // f32 再ランク済み = score が正確な距離
+    let exact = Metric::L2
+        .distance_key(&q, &data[hits[0].id as usize].1)
+        .sqrt();
+    assert!(
+        (hits[0].score - exact).abs() < 1e-4,
+        "score must be exact f32 distance"
+    );
+}
+
+/// IVF (todo 1004): nprobe クラスタだけを走査する枝刈り検索。nprobe を上げると
+/// recall が改善し、十分大きな nprobe で全走査 (Flat) の正解に一致すること。
+#[test]
+fn ivf_nprobe_improves_recall() {
+    let dir = tempfile::tempdir().unwrap();
+    let opts = || StoreOptions {
+        hnsw_min_rows: 64,
+        index: hamane::IndexKind::Ivf,
+        nprobe: 1,
+        ..Default::default()
+    };
+    let db = Database::open_with_options(dir.path(), opts()).unwrap();
+    let col = db
+        .create_collection(
+            "docs",
+            CollectionConfig {
+                dim: DIM,
+                metric: Metric::L2,
+            },
+        )
+        .unwrap();
+
+    let mut rng = StdRng::seed_from_u64(1004);
+    let mut data = Vec::new();
+    let records: Vec<Record> = (0..3000u64)
+        .map(|i| {
+            let v = random_vec(&mut rng);
+            data.push((i, v.clone()));
+            Record::new(i, v)
+        })
+        .collect();
+    col.upsert_batch(records).unwrap();
+    col.flush().unwrap();
+
+    // nprobe を変えて recall@10 を測る。単調に改善し、大きな nprobe で 1.0
+    let recall_at = |nprobe: usize, rng: &mut StdRng| -> f64 {
+        let queries = 40;
+        let mut total = 0.0;
+        for _ in 0..queries {
+            let q = random_vec(rng);
+            let hits: Vec<u64> = col
+                .search(&q)
+                .k(10)
+                .nprobe(nprobe)
+                .run()
+                .unwrap()
+                .iter()
+                .map(|h| h.id)
+                .collect();
+            let truth = flat_topk(data.iter().map(|(i, v)| (*i, v)), &q, 10, |_| true);
+            total += recall(&hits, &truth);
+        }
+        total / queries as f64
+    };
+
+    let r1 = recall_at(1, &mut rng);
+    let r8 = recall_at(8, &mut rng);
+    // nlist = sqrt(3000) ≈ 55。全クラスタ走査 = 全走査なので Flat 正解に一致
+    let r_full = recall_at(1000, &mut rng);
+
+    assert!(
+        r8 >= r1,
+        "nprobe=8 recall {r8} should be >= nprobe=1 recall {r1}"
+    );
+    assert!(
+        r_full >= 0.999,
+        "full-probe recall {r_full} should match exact Flat"
+    );
+
+    // 再 open しても IVF 経路が生きている (score は正確な f32 距離)
+    drop(col);
+    drop(db);
+    let db = Database::open_with_options(dir.path(), opts()).unwrap();
+    let col = db.collection("docs").unwrap();
+    let q = random_vec(&mut rng);
+    let hits = col.search(&q).k(5).nprobe(1000).run().unwrap();
+    assert_eq!(hits.len(), 5);
+    let exact = Metric::L2
+        .distance_key(&q, &data[hits[0].id as usize].1)
+        .sqrt();
+    assert!(
+        (hits[0].score - exact).abs() < 1e-4,
+        "score must be exact f32 distance"
+    );
+}
+
+/// IVF-PQ (todo 1005): IVF の枝刈り + 残差 PQ 圧縮。nprobe を上げると recall が
+/// 改善し、再ランクありで高い recall を保つ。再 open 後も経路が生きること。
+#[test]
+fn ivfpq_two_stage_search_preserves_recall() {
+    let dir = tempfile::tempdir().unwrap();
+    let opts = || StoreOptions {
+        hnsw_min_rows: 64,
+        index: hamane::IndexKind::IvfPq,
+        quantization: Some(Quantization::Pq { m: None }),
+        nprobe: 8,
+        ..Default::default()
+    };
+    let db = Database::open_with_options(dir.path(), opts()).unwrap();
+    let col = db
+        .create_collection(
+            "docs",
+            CollectionConfig {
+                dim: DIM,
+                metric: Metric::L2,
+            },
+        )
+        .unwrap();
+
+    let mut rng = StdRng::seed_from_u64(1005);
+    let mut data = Vec::new();
+    let records: Vec<Record> = (0..3000u64)
+        .map(|i| {
+            let v = random_vec(&mut rng);
+            data.push((i, v.clone()));
+            Record::new(i, v)
+        })
+        .collect();
+    col.upsert_batch(records).unwrap();
+    col.flush().unwrap();
+
+    let recall_at = |nprobe: usize, rng: &mut StdRng| -> f64 {
+        let queries = 40;
+        let mut total = 0.0;
+        for _ in 0..queries {
+            let q = random_vec(rng);
+            let hits: Vec<u64> = col
+                .search(&q)
+                .k(10)
+                .nprobe(nprobe)
+                .run()
+                .unwrap()
+                .iter()
+                .map(|h| h.id)
+                .collect();
+            let truth = flat_topk(data.iter().map(|(i, v)| (*i, v)), &q, 10, |_| true);
+            total += recall(&hits, &truth);
+        }
+        total / queries as f64
+    };
+
+    let r1 = recall_at(1, &mut rng);
+    let r_full = recall_at(1000, &mut rng);
+    // full-probe + 再ランクで高 recall。nprobe を増やすと改善
+    assert!(
+        r_full >= r1,
+        "full-probe recall {r_full} should be >= nprobe=1 {r1}"
+    );
+    assert!(r_full >= 0.90, "ivfpq full-probe recall@10 = {r_full}");
+
+    // 再 open しても IVF-PQ 経路が生きている (score は正確な f32 距離)
+    drop(col);
+    drop(db);
+    let db = Database::open_with_options(dir.path(), opts()).unwrap();
+    let col = db.collection("docs").unwrap();
+    let q = random_vec(&mut rng);
+    let hits = col.search(&q).k(5).nprobe(1000).run().unwrap();
+    assert_eq!(hits.len(), 5);
     let exact = Metric::L2
         .distance_key(&q, &data[hits[0].id as usize].1)
         .sqrt();
