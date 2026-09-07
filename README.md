@@ -6,8 +6,9 @@ Rust 製の組み込み型ベクトルデータベースエンジン。
   group commit (`SyncPolicy::Batch`) 対応
 - **検索**: セグメントごとの HNSW (近似) + memtable の Flat (正確) をマージ。
   セグメント間はスレッド並列
-- **量子化と索引** (全て opt-in、既定 off): SQ8 / PQ / OPQ (回転付き PQ) の
-  量子化 + f32 再ランクの 2 段階検索、IVF / IVF-PQ の転置索引 (nprobe 枝刈り)
+- **量子化と索引** (全て opt-in、既定 off): SQ8 / PQ (8bit・4bit サブコード) /
+  OPQ (回転付き PQ) の量子化 + f32 再ランクの 2 段階検索、
+  IVF / IVF-PQ の転置索引 (nprobe 枝刈り)
 - **書き込みが止まらない**: フラッシュ (並列 HNSW 構築) とコンパクション
   (universal 風部分マージ) はバックグラウンド実行 (フラッシュ中の upsert p99 8µs)
 - **ID**: u64 と文字列 (UUID 等) の両対応

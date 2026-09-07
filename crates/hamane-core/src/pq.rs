@@ -14,10 +14,28 @@
 use crate::metric::{dot_scalar, l2_squared_scalar, Metric};
 use crate::{HamaneError, Result};
 
-/// サブコード幅 (ビット)。当面 8 のみ (コードが素直に `m` バイトに収まる)。
+/// サブコード幅 (ビット) の既定。8 = 1 サブベクトル 1 バイト・k*=256。
 pub const NBITS: u8 = 8;
-/// サブコードブックのセントロイド数 (= 2^NBITS)。
+/// 既定 nbits でのサブコードブックのセントロイド数 (= 2^NBITS)。
 pub const KSUB: usize = 1 << NBITS;
+
+/// `nbits` に対するサブコードブックのセントロイド数 (todo 1201)。
+#[inline]
+pub const fn ksub(nbits: u8) -> usize {
+    1usize << nbits
+}
+
+/// 1 行のコードが占めるバイト数。nbits=4 は 2 サブコードで 1 バイト。
+#[inline]
+pub const fn code_bytes(m: usize, nbits: u8) -> usize {
+    (m * nbits as usize).div_ceil(8)
+}
+
+/// 実装済みのサブコード幅か (4 と 8 のみ)。
+#[inline]
+pub const fn is_supported_nbits(nbits: u8) -> bool {
+    nbits == 4 || nbits == 8
+}
 
 /// コードブック学習の既定サンプル上限 (これを超える件数は間引いて学習する)。
 pub const DEFAULT_TRAIN_SAMPLE: usize = 65536;
@@ -253,7 +271,9 @@ fn farthest_point_of_biggest(
 pub struct PqCodebook {
     m: usize,
     dsub: usize,
-    /// レイアウト: `centroids[(j * KSUB + c) * dsub + d]`
+    /// サブコード幅 (4 か 8)。k* = 2^nbits
+    nbits: u8,
+    /// レイアウト: `centroids[(j * k* + c) * dsub + d]`
     centroids: Vec<f32>,
 }
 
@@ -273,22 +293,47 @@ impl PqCodebook {
     pub fn dim(&self) -> usize {
         self.m * self.dsub
     }
-    /// セントロイド本体 (直列化用)。`m × KSUB × dsub` の平坦化。
+    /// サブコード幅 (ビット)。
+    #[inline]
+    pub fn nbits(&self) -> u8 {
+        self.nbits
+    }
+    /// サブコードブックのセントロイド数 (= 2^nbits)。
+    #[inline]
+    pub fn ksub(&self) -> usize {
+        ksub(self.nbits)
+    }
+    /// 1 行のコードが占めるバイト数 (nbits=4 なら m/2)。
+    #[inline]
+    pub fn code_bytes(&self) -> usize {
+        code_bytes(self.m, self.nbits)
+    }
+    /// セントロイド本体 (直列化用)。`m × k* × dsub` の平坦化。
     #[inline]
     pub fn centroids(&self) -> &[f32] {
         &self.centroids
     }
 
     /// 直列化されたセントロイドからコードブックを復元する (mmap ロード用、todo 1003)。
-    pub fn from_centroids(m: usize, dsub: usize, centroids: Vec<f32>) -> Result<Self> {
-        if centroids.len() != m * KSUB * dsub {
+    pub fn from_centroids(m: usize, dsub: usize, nbits: u8, centroids: Vec<f32>) -> Result<Self> {
+        if !is_supported_nbits(nbits) {
             return Err(HamaneError::Corrupted(format!(
-                "pq codebook size mismatch: expected {}, got {}",
-                m * KSUB * dsub,
+                "pq unsupported nbits: {nbits}"
+            )));
+        }
+        let expected = m * ksub(nbits) * dsub;
+        if centroids.len() != expected {
+            return Err(HamaneError::Corrupted(format!(
+                "pq codebook size mismatch: expected {expected}, got {}",
                 centroids.len()
             )));
         }
-        Ok(Self { m, dsub, centroids })
+        Ok(Self {
+            m,
+            dsub,
+            nbits,
+            centroids,
+        })
     }
 
     /// 学習データからコードブックを学習する。
@@ -296,10 +341,12 @@ impl PqCodebook {
     /// - `dim % m != 0` は `InvalidConfig`
     /// - 件数が `train_sample` を超えたら決定的に間引く (等間隔ストライド)
     /// - サブベクトルごとに `kmeans` を回す (seed はサブベクトル番号で分離)
+    /// - `nbits` は 4 か 8 (それ以外は `InvalidConfig`)
     pub fn train(
         vectors: &[&[f32]],
         dim: usize,
         m: usize,
+        nbits: u8,
         seed: u64,
         train_sample: usize,
         max_iter: usize,
@@ -309,7 +356,13 @@ impl PqCodebook {
                 "pq requires dim ({dim}) divisible by m ({m})"
             )));
         }
+        if !is_supported_nbits(nbits) {
+            return Err(HamaneError::InvalidConfig(format!(
+                "pq supports nbits 4 or 8, got {nbits}"
+            )));
+        }
         let dsub = dim / m;
+        let ksub = ksub(nbits);
 
         // 学習用サンプル (件数が多ければ等間隔で間引く)
         let sample: Vec<&[f32]> = if vectors.len() > train_sample && train_sample > 0 {
@@ -324,7 +377,7 @@ impl PqCodebook {
             vectors.to_vec()
         };
 
-        let mut centroids = vec![0.0f32; m * KSUB * dsub];
+        let mut centroids = vec![0.0f32; m * ksub * dsub];
         // サブベクトル j ごとに独立に学習
         let mut sub: Vec<&[f32]> = Vec::with_capacity(sample.len());
         for j in 0..m {
@@ -334,59 +387,128 @@ impl PqCodebook {
             }
             // seed をサブベクトルごとにずらして相関を避ける
             let sub_seed = seed ^ (j as u64).wrapping_mul(0x9E3779B97F4A7C15);
-            let cb = kmeans(&sub, dsub, KSUB, sub_seed, max_iter);
-            centroids[j * KSUB * dsub..(j + 1) * KSUB * dsub].copy_from_slice(&cb);
+            let cb = kmeans(&sub, dsub, ksub, sub_seed, max_iter);
+            centroids[j * ksub * dsub..(j + 1) * ksub * dsub].copy_from_slice(&cb);
         }
 
-        Ok(Self { m, dsub, centroids })
+        Ok(Self {
+            m,
+            dsub,
+            nbits,
+            centroids,
+        })
     }
 
     /// サブベクトル `j` のセントロイド `c` のスライス。
     #[inline]
     fn centroid(&self, j: usize, c: usize) -> &[f32] {
-        let base = (j * KSUB + c) * self.dsub;
+        let base = (j * self.ksub() + c) * self.dsub;
         &self.centroids[base..base + self.dsub]
     }
 
-    /// 1 本のベクトルを `m` バイトのコードに符号化する (各サブベクトルの L2 最近傍)。
+    /// コード列からサブベクトル `j` のセントロイド ID を取り出す。
+    /// nbits=4 は 1 バイトに 2 個 (偶数 j が下位ニブル)。
+    #[inline]
+    fn sub_code(&self, code: &[u8], j: usize) -> usize {
+        match self.nbits {
+            4 => {
+                let byte = code[j / 2];
+                if j.is_multiple_of(2) {
+                    (byte & 0x0f) as usize
+                } else {
+                    (byte >> 4) as usize
+                }
+            }
+            _ => code[j] as usize,
+        }
+    }
+
+    /// 1 本のベクトルを `code_bytes()` バイトのコードに符号化する
+    /// (各サブベクトルの L2 最近傍)。nbits=4 は 2 サブコードを 1 バイトに詰める。
     pub fn encode(&self, vector: &[f32], out: &mut Vec<u8>) {
         debug_assert_eq!(vector.len(), self.dim());
+        let ksub = self.ksub();
+        let mut pending = 0u8; // nbits=4 のとき偶数 j の下位ニブルを保持
         for j in 0..self.m {
             let vsub = &vector[j * self.dsub..(j + 1) * self.dsub];
             let mut best = 0u8;
             let mut best_d = f32::INFINITY;
-            for c in 0..KSUB {
+            for c in 0..ksub {
                 let d = l2_squared_scalar(vsub, self.centroid(j, c));
                 if d < best_d {
                     best_d = d;
                     best = c as u8;
                 }
             }
-            out.push(best);
+            if self.nbits == 4 {
+                if j.is_multiple_of(2) {
+                    pending = best & 0x0f;
+                    // m が奇数なら最後のニブルは上位を 0 埋めして出す
+                    if j + 1 == self.m {
+                        out.push(pending);
+                    }
+                } else {
+                    out.push(pending | (best << 4));
+                }
+            } else {
+                out.push(best);
+            }
         }
     }
 
     /// コードから元ベクトルを復元する (各サブベクトルをセントロイドで置換)。
     /// OPQ の交互最適化 (todo 1102) と量子化誤差の計測に使う。
     pub fn decode_into(&self, code: &[u8], out: &mut [f32]) {
-        debug_assert_eq!(code.len(), self.m);
+        debug_assert_eq!(code.len(), self.code_bytes());
         debug_assert_eq!(out.len(), self.dim());
         for j in 0..self.m {
-            let c = self.centroid(j, code[j] as usize);
+            let c = self.centroid(j, self.sub_code(code, j));
             out[j * self.dsub..(j + 1) * self.dsub].copy_from_slice(c);
         }
     }
 
-    /// クエリと全セントロイドの距離を先計算した LUT (`m × KSUB`) を作る。
+    /// クエリと全セントロイドの距離を先計算した LUT を作る。
     ///
     /// 各エントリは **「小さいほど近い」に正規化済み** (L2 は距離²、Dot/Cosine は
     /// 内積の符号反転)。したがって `distance_key` は符号を気にせず表引き加算でよい。
+    ///
+    /// - nbits=8: `m × 256` のサブベクトル別テーブル
+    /// - nbits=4: **バイト単位の合成テーブル `(m/2) × 256`** (todo 1204)。
+    ///   4bit は 1 バイトに 2 サブコードが入るので、そのバイト値をそのまま引けば
+    ///   2 サブベクトルぶんの距離が 1 回で得られる。表引き回数が半分になり、
+    ///   ニブル展開も消える (同じコード長の 8bit と同じループ回数になる)
     pub fn build_lut(&self, query: &[f32], metric: Metric) -> Vec<f32> {
+        let base = self.build_sub_lut(query, metric);
+        if self.nbits != 4 {
+            return base;
+        }
+        // 合成: byte b = (hi << 4) | lo → lut[2i][lo] + lut[2i+1][hi]
+        let pairs = self.m / 2;
+        let mut fused = vec![0.0f32; pairs * 256 + if self.m % 2 == 1 { 16 } else { 0 }];
+        for i in 0..pairs {
+            let lo_row = &base[2 * i * 16..2 * i * 16 + 16];
+            let hi_row = &base[(2 * i + 1) * 16..(2 * i + 1) * 16 + 16];
+            let out = &mut fused[i * 256..(i + 1) * 256];
+            for (b, slot) in out.iter_mut().enumerate() {
+                *slot = lo_row[b & 0x0f] + hi_row[b >> 4];
+            }
+        }
+        // m が奇数なら最後の 1 サブベクトルは従来どおり 16 エントリで持つ
+        if self.m % 2 == 1 {
+            let last = &base[(self.m - 1) * 16..self.m * 16];
+            fused[pairs * 256..pairs * 256 + 16].copy_from_slice(last);
+        }
+        fused
+    }
+
+    /// サブベクトル別の生 LUT (`m × k*`)。合成前の形。
+    fn build_sub_lut(&self, query: &[f32], metric: Metric) -> Vec<f32> {
         debug_assert_eq!(query.len(), self.dim());
-        let mut lut = vec![0.0f32; self.m * KSUB];
+        let ksub = self.ksub();
+        let mut lut = vec![0.0f32; self.m * ksub];
         for j in 0..self.m {
             let qsub = &query[j * self.dsub..(j + 1) * self.dsub];
-            let row = &mut lut[j * KSUB..(j + 1) * KSUB];
+            let row = &mut lut[j * ksub..(j + 1) * ksub];
             match metric {
                 Metric::L2 => {
                     for (c, slot) in row.iter_mut().enumerate() {
@@ -406,10 +528,24 @@ impl PqCodebook {
     /// LUT とコードから距離キー (小さいほど近い) を推定する。
     #[inline]
     pub fn distance_key(&self, lut: &[f32], code: &[u8]) -> f32 {
-        debug_assert_eq!(code.len(), self.m);
+        debug_assert_eq!(code.len(), self.code_bytes());
+        if self.nbits == 4 {
+            // バイト値をそのまま引く (2 サブベクトルぶんの合成テーブル)
+            let pairs = self.m / 2;
+            let mut sum = 0.0f32;
+            for (i, &byte) in code.iter().take(pairs).enumerate() {
+                sum += lut[i * 256 + byte as usize];
+            }
+            if self.m % 2 == 1 {
+                // 端数のサブベクトルは下位ニブルだけを 16 エントリ表から引く
+                sum += lut[pairs * 256 + (code[pairs] & 0x0f) as usize];
+            }
+            return sum;
+        }
+        let ksub = self.ksub();
         let mut sum = 0.0f32;
         for j in 0..self.m {
-            sum += lut[j * KSUB + code[j] as usize];
+            sum += lut[j * ksub + code[j] as usize];
         }
         sum
     }
@@ -458,7 +594,7 @@ mod tests {
     fn train_rejects_indivisible_dim() {
         let data = clustered_data(50, 10, 4, 1);
         let slices = as_slices(&data);
-        assert!(PqCodebook::train(&slices, 10, 3, 0, 1000, 10).is_err());
+        assert!(PqCodebook::train(&slices, 10, 3, NBITS, 0, 1000, 10).is_err());
     }
 
     #[test]
@@ -467,7 +603,7 @@ mod tests {
         let m = 16;
         let data = clustered_data(2000, dim, 32, 7);
         let slices = as_slices(&data);
-        let cb = PqCodebook::train(&slices, dim, m, 0, 65536, 25).unwrap();
+        let cb = PqCodebook::train(&slices, dim, m, NBITS, 0, 65536, 25).unwrap();
 
         // 各行を符号化
         let codes: Vec<Vec<u8>> = data
@@ -504,7 +640,7 @@ mod tests {
         let m = 8;
         let data = clustered_data(1000, dim, 16, 3);
         let slices = as_slices(&data);
-        let cb = PqCodebook::train(&slices, dim, m, 0, 65536, 25).unwrap();
+        let cb = PqCodebook::train(&slices, dim, m, NBITS, 0, 65536, 25).unwrap();
         let codes: Vec<Vec<u8>> = data
             .iter()
             .map(|v| {
@@ -556,7 +692,7 @@ mod tests {
         let m = 12;
         let data = clustered_data(800, dim, 16, 11);
         let slices = as_slices(&data);
-        let cb = PqCodebook::train(&slices, dim, m, 0, 65536, 25).unwrap();
+        let cb = PqCodebook::train(&slices, dim, m, NBITS, 0, 65536, 25).unwrap();
         let codes: Vec<Vec<u8>> = data
             .iter()
             .map(|v| {
@@ -587,8 +723,8 @@ mod tests {
     fn training_is_deterministic() {
         let data = clustered_data(500, 32, 8, 4);
         let slices = as_slices(&data);
-        let a = PqCodebook::train(&slices, 32, 8, 42, 65536, 25).unwrap();
-        let b = PqCodebook::train(&slices, 32, 8, 42, 65536, 25).unwrap();
+        let a = PqCodebook::train(&slices, 32, 8, NBITS, 42, 65536, 25).unwrap();
+        let b = PqCodebook::train(&slices, 32, 8, NBITS, 42, 65536, 25).unwrap();
         assert_eq!(a, b);
     }
 
@@ -596,12 +732,13 @@ mod tests {
     fn from_centroids_roundtrip() {
         let data = clustered_data(300, 16, 8, 5);
         let slices = as_slices(&data);
-        let cb = PqCodebook::train(&slices, 16, 4, 1, 65536, 25).unwrap();
+        let cb = PqCodebook::train(&slices, 16, 4, NBITS, 1, 65536, 25).unwrap();
         let restored =
-            PqCodebook::from_centroids(cb.m(), cb.dsub(), cb.centroids().to_vec()).unwrap();
+            PqCodebook::from_centroids(cb.m(), cb.dsub(), cb.nbits(), cb.centroids().to_vec())
+                .unwrap();
         assert_eq!(cb, restored);
         // サイズ不整合はエラー
-        assert!(PqCodebook::from_centroids(4, 4, vec![0.0; 3]).is_err());
+        assert!(PqCodebook::from_centroids(4, 4, NBITS, vec![0.0; 3]).is_err());
     }
 
     #[test]
@@ -609,7 +746,7 @@ mod tests {
         // 全点同一 (空クラスタ多発) でも学習が完了する
         let data: Vec<Vec<f32>> = (0..100).map(|_| vec![1.0f32; 16]).collect();
         let slices = as_slices(&data);
-        let cb = PqCodebook::train(&slices, 16, 4, 0, 65536, 25).unwrap();
+        let cb = PqCodebook::train(&slices, 16, 4, NBITS, 0, 65536, 25).unwrap();
         let mut code = Vec::new();
         cb.encode(&data[0], &mut code);
         assert_eq!(code.len(), 4);
@@ -671,7 +808,7 @@ mod tests {
         let slices = as_slices(&data);
 
         // 生ベクトルで学習した PQ
-        let raw = PqCodebook::train(&slices, DIM, M, 1, 65536, MAX_ITER).unwrap();
+        let raw = PqCodebook::train(&slices, DIM, M, NBITS, 1, 65536, MAX_ITER).unwrap();
         let raw_mse = reconstruction_mse(&raw, &data, None);
 
         // 粗 k-means → 残差空間で学習した PQ (IVF-PQ と同じ手順)
@@ -689,12 +826,113 @@ mod tests {
             .map(|(v, c)| v.iter().zip(c.iter()).map(|(x, cc)| x - cc).collect())
             .collect();
         let res_slices = as_slices(&residuals);
-        let res = PqCodebook::train(&res_slices, DIM, M, 1, 65536, MAX_ITER).unwrap();
+        let res = PqCodebook::train(&res_slices, DIM, M, NBITS, 1, 65536, MAX_ITER).unwrap();
         let res_mse = reconstruction_mse(&res, &data, Some(&bases));
 
         assert!(
             res_mse < raw_mse,
             "residual pq mse {res_mse} should be below raw pq mse {raw_mse}"
         );
+    }
+
+    #[test]
+    fn nbits4_packs_two_subcodes_per_byte() {
+        const DIM: usize = 16;
+        const M: usize = 8;
+        let data = clustered_data(400, DIM, 6, 4);
+        let slices = as_slices(&data);
+        let cb4 = PqCodebook::train(&slices, DIM, M, 4, 0, 65536, 25).unwrap();
+        assert_eq!(cb4.nbits(), 4);
+        assert_eq!(cb4.ksub(), 16);
+        assert_eq!(cb4.code_bytes(), M / 2, "2 サブコードで 1 バイト");
+
+        let mut code = Vec::new();
+        cb4.encode(&data[0], &mut code);
+        assert_eq!(code.len(), M / 2);
+
+        // ラウンドトリップ: 復元 → 再符号化で同じコードになる
+        let mut recon = vec![0.0f32; DIM];
+        cb4.decode_into(&code, &mut recon);
+        let mut code2 = Vec::new();
+        cb4.encode(&recon, &mut code2);
+        assert_eq!(code, code2);
+
+        // LUT の表引きが復元ベクトルの実距離と整合する (L2)
+        let q = &data[1];
+        let lut = cb4.build_lut(q, Metric::L2);
+        let est = cb4.distance_key(&lut, &code);
+        let exact = l2_squared_scalar(q, &recon);
+        assert!(
+            (est - exact).abs() / exact.max(1e-6) < 1e-3,
+            "adc {est} vs exact {exact}"
+        );
+    }
+
+    #[test]
+    fn nbits4_is_half_the_size_and_coarser() {
+        const DIM: usize = 16;
+        const M: usize = 8;
+        let data = clustered_data(600, DIM, 12, 9);
+        let slices = as_slices(&data);
+        let mse = |nbits: u8| -> f64 {
+            let cb = PqCodebook::train(&slices, DIM, M, nbits, 0, 65536, 25).unwrap();
+            let mut code = Vec::new();
+            let mut recon = vec![0.0f32; DIM];
+            let mut sum = 0.0f64;
+            for v in &data {
+                code.clear();
+                cb.encode(v, &mut code);
+                cb.decode_into(&code, &mut recon);
+                sum += l2_squared_scalar(v, &recon) as f64;
+            }
+            sum / data.len() as f64
+        };
+        let (e8, e4) = (mse(8), mse(4));
+        assert!(e4 >= e8, "4bit ({e4}) は 8bit ({e8}) より粗いはず");
+        assert_eq!(code_bytes(M, 4) * 2, code_bytes(M, 8));
+    }
+
+    #[test]
+    fn unsupported_nbits_is_rejected() {
+        let data = clustered_data(50, 8, 2, 1);
+        let slices = as_slices(&data);
+        for nbits in [0u8, 1, 6, 16] {
+            assert!(
+                PqCodebook::train(&slices, 8, 2, nbits, 0, 65536, 5).is_err(),
+                "nbits {nbits} must be rejected"
+            );
+        }
+        assert!(PqCodebook::from_centroids(2, 4, 6, vec![0.0; 2 * 64 * 4]).is_err());
+    }
+
+    #[test]
+    fn fused_byte_lut_matches_subvector_lut() {
+        // nbits=4 の合成 LUT (バイト単位 256 エントリ) が、サブベクトル別の
+        // 16 エントリ表を 2 回引いた値と一致すること (todo 1204)
+        for (dim, m) in [(16usize, 8usize), (16, 4), (12, 3)] {
+            let data = clustered_data(300, dim, 5, 17);
+            let slices = as_slices(&data);
+            let cb = PqCodebook::train(&slices, dim, m, 4, 2, 65536, 20).unwrap();
+            let q = &data[7];
+            for metric in [Metric::L2, Metric::Dot] {
+                let fused = cb.build_lut(q, metric);
+                let sub = cb.build_sub_lut(q, metric);
+                let mut code = Vec::new();
+                for v in data.iter().take(20) {
+                    code.clear();
+                    cb.encode(v, &mut code);
+                    let got = cb.distance_key(&fused, &code);
+                    // 参照: サブベクトル別テーブルをニブル展開して足す
+                    let mut want = 0.0f32;
+                    for j in 0..m {
+                        want += sub[j * 16 + cb.sub_code(&code, j)];
+                    }
+                    assert!(
+                        (got - want).abs() <= want.abs() * 1e-5 + 1e-5,
+                        "dim={dim} m={m} {metric:?}: fused {got} vs sub {want}"
+                    );
+                }
+            }
+        }
     }
 }

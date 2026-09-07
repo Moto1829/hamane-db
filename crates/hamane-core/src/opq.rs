@@ -485,7 +485,7 @@ impl OpqRotation {
     ///
     /// 最後に「回転なし (= 素の PQ)」の誤差とも比べ、勝てなければ恒等行列を
     /// 返す。**OPQ を有効にして PQ より悪くなることはない**。
-    pub fn train(vectors: &[&[f32]], dim: usize, m: usize, seed: u64) -> Result<Self> {
+    pub fn train(vectors: &[&[f32]], dim: usize, m: usize, nbits: u8, seed: u64) -> Result<Self> {
         if m == 0 || !dim.is_multiple_of(m) {
             return Err(HamaneError::InvalidConfig(format!(
                 "opq requires dim ({dim}) divisible by m ({m})"
@@ -498,13 +498,13 @@ impl OpqRotation {
 
         // 回転なしの誤差 (これに勝てなければ採用しない)
         let mut best_r = identity(dim);
-        let mut best_err = Self::sample_error(&sample, dim, m, seed, &best_r)?;
+        let mut best_err = Self::sample_error(&sample, dim, m, nbits, seed, &best_r)?;
 
         let no_rotation_err = best_err;
 
         // 1. 恒等初期値から交互最適化
-        let r = Self::optimize(&sample, dim, m, seed, identity(dim))?;
-        let err = Self::sample_error(&sample, dim, m, seed, &r)?;
+        let r = Self::optimize(&sample, dim, m, nbits, seed, identity(dim))?;
+        let err = Self::sample_error(&sample, dim, m, nbits, seed, &r)?;
         if err < best_err {
             best_err = err;
             best_r = r;
@@ -514,8 +514,8 @@ impl OpqRotation {
         //    初期値からも試す。PCA + 固有値割り当てで分散を均した出発点
         if best_err > no_rotation_err * 0.99 {
             let init = parametric_init(&sample, dim, m);
-            let r = Self::optimize(&sample, dim, m, seed, init)?;
-            let err = Self::sample_error(&sample, dim, m, seed, &r)?;
+            let r = Self::optimize(&sample, dim, m, nbits, seed, init)?;
+            let err = Self::sample_error(&sample, dim, m, nbits, seed, &r)?;
             if err < best_err {
                 best_r = r;
             }
@@ -532,10 +532,12 @@ impl OpqRotation {
 
     /// 交互最適化を `OPQ_ITERS` 回まわして回転行列を返す。
     /// 極分解に失敗した反復は捨てて直前の `R` を返す (学習は失敗させない)。
+    #[allow(clippy::too_many_arguments)]
     fn optimize(
         sample: &[&[f32]],
         dim: usize,
         m: usize,
+        nbits: u8,
         seed: u64,
         init: Vec<f32>,
     ) -> Result<Vec<f32>> {
@@ -559,6 +561,7 @@ impl OpqRotation {
                 &rot_slices,
                 dim,
                 m,
+                nbits,
                 seed ^ (it as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
                 OPQ_TRAIN_SAMPLE,
                 OPQ_INNER_ITER,
@@ -595,11 +598,26 @@ impl OpqRotation {
 
     /// 回転 `r` を掛けたサンプルの PQ 再構成誤差 (候補比較用)。
     /// 反復中と同じ `OPQ_INNER_ITER` で学習して条件を揃える。
-    fn sample_error(sample: &[&[f32]], dim: usize, m: usize, seed: u64, r: &[f32]) -> Result<f64> {
+    fn sample_error(
+        sample: &[&[f32]],
+        dim: usize,
+        m: usize,
+        nbits: u8,
+        seed: u64,
+        r: &[f32],
+    ) -> Result<f64> {
         let rot = Self { dim, r: r.to_vec() };
         let rotated: Vec<Vec<f32>> = sample.iter().map(|v| rot.apply(v)).collect();
         let slices: Vec<&[f32]> = rotated.iter().map(|v| v.as_slice()).collect();
-        let cb = PqCodebook::train(&slices, dim, m, seed, OPQ_TRAIN_SAMPLE, OPQ_INNER_ITER)?;
+        let cb = PqCodebook::train(
+            &slices,
+            dim,
+            m,
+            nbits,
+            seed,
+            OPQ_TRAIN_SAMPLE,
+            OPQ_INNER_ITER,
+        )?;
         let mut code = Vec::with_capacity(m);
         let mut recon = vec![0.0f32; dim];
         let mut sum = 0.0f64;
@@ -618,6 +636,7 @@ mod tests {
     use super::*;
     use crate::metric::l2_squared_scalar;
     use crate::pq::DEFAULT_MAX_ITER;
+    use crate::pq::NBITS;
 
     /// 決定的な擬似乱数 (テスト用の簡易 LCG)。
     struct Rng(u64);
@@ -662,7 +681,7 @@ mod tests {
     /// 与えたベクトル集合を PQ 符号化したときの平均二乗誤差。
     fn pq_mse(data: &[Vec<f32>], dim: usize, m: usize, seed: u64) -> f64 {
         let slices = as_slices(data);
-        let cb = PqCodebook::train(&slices, dim, m, seed, 65536, DEFAULT_MAX_ITER).unwrap();
+        let cb = PqCodebook::train(&slices, dim, m, NBITS, seed, 65536, DEFAULT_MAX_ITER).unwrap();
         let mut code = Vec::new();
         let mut recon = vec![0.0f32; dim];
         let mut sum = 0.0f64;
@@ -686,7 +705,7 @@ mod tests {
     fn trained_rotation_is_orthogonal() {
         let data = variance_skewed(500, 8, 11);
         let slices = as_slices(&data);
-        let r = OpqRotation::train(&slices, 8, 2, 1).unwrap();
+        let r = OpqRotation::train(&slices, 8, 2, NBITS, 1).unwrap();
         assert!(
             ortho_error(r.matrix(), 8) < ORTHO_TOL,
             "‖RᵀR − I‖ = {}",
@@ -714,7 +733,7 @@ mod tests {
 
         let raw = pq_mse(&data, DIM, M, 3);
 
-        let r = OpqRotation::train(&slices, DIM, M, 3).unwrap();
+        let r = OpqRotation::train(&slices, DIM, M, NBITS, 3).unwrap();
         let rotated: Vec<Vec<f32>> = data.iter().map(|v| r.apply(v)).collect();
         let opq = pq_mse(&rotated, DIM, M, 3);
 
@@ -728,8 +747,8 @@ mod tests {
     fn train_is_deterministic() {
         let data = variance_skewed(200, 8, 5);
         let slices = as_slices(&data);
-        let a = OpqRotation::train(&slices, 8, 2, 42).unwrap();
-        let b = OpqRotation::train(&slices, 8, 2, 42).unwrap();
+        let a = OpqRotation::train(&slices, 8, 2, NBITS, 42).unwrap();
+        let b = OpqRotation::train(&slices, 8, 2, NBITS, 42).unwrap();
         assert_eq!(a, b);
     }
 
@@ -738,13 +757,13 @@ mod tests {
         // 全点同一 → 共分散が特異。panic せず直交行列を返す
         let data: Vec<Vec<f32>> = (0..50).map(|_| vec![1.0f32; 8]).collect();
         let slices = as_slices(&data);
-        let r = OpqRotation::train(&slices, 8, 2, 0).unwrap();
+        let r = OpqRotation::train(&slices, 8, 2, NBITS, 0).unwrap();
         assert!(ortho_error(r.matrix(), 8) < ORTHO_TOL);
 
         // 空入力 / 点数 < ksub でも恒等行列
         let empty: Vec<&[f32]> = Vec::new();
         assert_eq!(
-            OpqRotation::train(&empty, 8, 2, 0).unwrap(),
+            OpqRotation::train(&empty, 8, 2, NBITS, 0).unwrap(),
             OpqRotation::identity(8)
         );
     }
@@ -753,7 +772,7 @@ mod tests {
     fn train_rejects_indivisible_m() {
         let data = variance_skewed(50, 9, 1);
         let slices = as_slices(&data);
-        assert!(OpqRotation::train(&slices, 9, 2, 0).is_err());
+        assert!(OpqRotation::train(&slices, 9, 2, NBITS, 0).is_err());
     }
 
     #[test]
@@ -813,7 +832,7 @@ mod tests {
         let slices = as_slices(&data);
 
         let plain = pq_mse(&data, DIM, M, 3);
-        let r = OpqRotation::train(&slices, DIM, M, 3).unwrap();
+        let r = OpqRotation::train(&slices, DIM, M, NBITS, 3).unwrap();
         let rotated: Vec<Vec<f32>> = data.iter().map(|v| r.apply(v)).collect();
         let opq = pq_mse(&rotated, DIM, M, 3);
 

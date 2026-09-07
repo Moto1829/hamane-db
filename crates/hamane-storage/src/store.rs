@@ -49,6 +49,10 @@ pub struct StoreOptions {
     /// `quantization = Some(Pq)` のときのみ有効 (docs/design/opq.md §4)。
     /// 構築は遅くなるが、同じ m でより低い量子化誤差 = 高い recall が得られる
     pub opq: bool,
+    /// PQ のサブコード幅 (4 か 8、既定 8。todo 1202)。4 にすると 1 行の
+    /// コードが半分 (m/2 バイト) になり作業集合が縮む代わりに量子化が粗くなる。
+    /// 同じコード長で比べるなら m を 2 倍にして nbits=4 にする使い方もある
+    pub pq_nbits: u8,
     /// IVF 検索でクエリごとに走査するクラスタ数の既定値 (検索時に上書き可)。
     /// 大きいほど再現率が上がり遅くなる。IndexKind::Ivf のときのみ有効
     pub nprobe: usize,
@@ -68,6 +72,7 @@ impl Default for StoreOptions {
             compaction_threshold: 4,
             quantization: None,
             opq: false,
+            pq_nbits: hamane_core::pq::NBITS,
             index: IndexKind::Hnsw,
             nprobe: 8,
             search_threads: 0,
@@ -113,6 +118,14 @@ impl StoreOptions {
         // OPQ は PQ のコードブック学習の前段なので、PQ 以外との併用は無意味
         if self.opq && !matches!(self.quantization, Some(Quantization::Pq { .. })) {
             return bad("opq requires quantization = Some(Quantization::Pq)");
+        }
+        if !hamane_core::pq::is_supported_nbits(self.pq_nbits) {
+            return bad("pq_nbits must be 4 or 8");
+        }
+        if self.pq_nbits != hamane_core::pq::NBITS
+            && !matches!(self.quantization, Some(Quantization::Pq { .. }))
+        {
+            return bad("pq_nbits != 8 requires quantization = Some(Quantization::Pq)");
         }
         if self.nprobe == 0 {
             return bad("nprobe must be >= 1");
@@ -1327,6 +1340,7 @@ impl Shared {
                 index: self.options.index,
                 quantization: self.options.quantization,
                 opq: self.options.opq,
+                pq_nbits: self.options.pq_nbits,
             };
             let meta = SegmentWriter::write(&dir, *seg_id, memtable, Some(spec))?;
             entries.push((
@@ -1493,6 +1507,7 @@ impl Shared {
                 index: self.options.index,
                 quantization: self.options.quantization,
                 opq: self.options.opq,
+                pq_nbits: self.options.pq_nbits,
             };
             SegmentWriter::write(&dir, seg_id, &merged.snapshot(), Some(spec))?;
             Some(SegmentEntry {
@@ -2162,6 +2177,17 @@ mod tests {
             // nprobe = 0 は不可
             StoreOptions {
                 nprobe: 0,
+                ..Default::default()
+            },
+            // pq_nbits は 4/8 のみ、かつ PQ 専用 (todo 1202)
+            StoreOptions {
+                pq_nbits: 6,
+                quantization: Some(Quantization::Pq { m: None }),
+                ..Default::default()
+            },
+            StoreOptions {
+                pq_nbits: 4,
+                quantization: Some(Quantization::Sq8),
                 ..Default::default()
             },
             // OPQ は PQ 以外と併用不可 (todo 1103)

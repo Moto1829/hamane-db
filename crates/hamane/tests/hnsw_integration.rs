@@ -888,3 +888,152 @@ fn corrupted_opq_file_is_rejected() {
         "corrupted opq.bin must be rejected"
     );
 }
+
+/// 4-bit PQ (todo 1202): コードが半分のバイト数になり、再ランクで recall を保つ。
+/// ヘッダに nbits があるのでフォーマットは自己記述的 (8bit セグメントと共存可)。
+#[test]
+fn pq_4bit_halves_code_size_and_keeps_recall() {
+    let build = |nbits: u8, m: usize, seed: u64| -> (std::path::PathBuf, tempfile::TempDir, f64) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open_with_options(
+            dir.path(),
+            StoreOptions {
+                hnsw_min_rows: 64,
+                quantization: Some(Quantization::Pq { m: Some(m) }),
+                pq_nbits: nbits,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let col = db
+            .create_collection(
+                "docs",
+                CollectionConfig {
+                    dim: DIM,
+                    metric: Metric::L2,
+                },
+            )
+            .unwrap();
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut data = Vec::new();
+        let records: Vec<Record> = (0..3000u64)
+            .map(|i| {
+                let v = random_vec(&mut rng);
+                data.push((i, v.clone()));
+                Record::new(i, v)
+            })
+            .collect();
+        col.upsert_batch(records).unwrap();
+        col.flush().unwrap();
+
+        let mut total = 0.0;
+        let queries = 40;
+        for _ in 0..queries {
+            let q = random_vec(&mut rng);
+            let hits: Vec<u64> = col
+                .search(&q)
+                .k(10)
+                .run()
+                .unwrap()
+                .iter()
+                .map(|h| h.id)
+                .collect();
+            let truth = flat_topk(data.iter().map(|(i, v)| (*i, v)), &q, 10, |_| true);
+            total += recall(&hits, &truth);
+        }
+        let path = walk_segment_files(dir.path(), "vectors_pq.bin")
+            .pop()
+            .unwrap();
+        let recall = total / queries as f64;
+        (path, dir, recall)
+    };
+
+    // (a) 基準: 8bit, m=4 → 4 B/行
+    let (p8, _d8, r8) = build(8, 4, 1202);
+    // (b) 同じ m で 4bit → 2 B/行 (メモリ半分・粗い)
+    let (p4, _d4, r4) = build(4, 4, 1202);
+    // (c) m を 2 倍にした 4bit → 4 B/行 (同じコード長)
+    let (p4b, _d4b, r4b) = build(4, 8, 1202);
+    let size = |p: &std::path::Path| std::fs::metadata(p).unwrap().len();
+
+    // コード領域は半分。コードブックも 256 → 16 セントロイドで小さい
+    assert!(
+        size(&p4) < size(&p8),
+        "4bit file {} must be smaller than 8bit {}",
+        size(&p4),
+        size(&p8)
+    );
+    // (c) は 8bit と同じコード長で、サブベクトルが細かいぶん recall も出る
+    assert!(
+        r4b >= 0.95,
+        "4bit m=8 recall@10 = {r4b:.3} (8bit m=4: {r8:.3})"
+    );
+    assert!(r8 >= 0.95, "8bit pq recall@10 = {r8:.3}");
+    // (b) はコードが半分なので粗くなるが、再ランク (4bit は k×8) で実用域に残る
+    assert!(r4 >= 0.75, "4bit m=4 recall@10 = {r4:.3}");
+    assert!(
+        size(&p4b) <= size(&p8),
+        "同じコード長なら 8bit 以下のサイズ"
+    );
+}
+
+/// 4-bit PQ + IVF-PQ + OPQ の組み合わせでも検索が通ること (todo 1202)。
+#[test]
+fn pq_4bit_works_with_ivfpq_and_opq() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open_with_options(
+        dir.path(),
+        StoreOptions {
+            hnsw_min_rows: 64,
+            index: hamane::IndexKind::IvfPq,
+            quantization: Some(Quantization::Pq { m: Some(8) }),
+            pq_nbits: 4,
+            opq: true,
+            nprobe: 8,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let col = db
+        .create_collection(
+            "docs",
+            CollectionConfig {
+                dim: DIM,
+                metric: Metric::L2,
+            },
+        )
+        .unwrap();
+    let mut rng = StdRng::seed_from_u64(12021);
+    let mut data = Vec::new();
+    let records: Vec<Record> = (0..2000u64)
+        .map(|i| {
+            let v = random_vec(&mut rng);
+            data.push((i, v.clone()));
+            Record::new(i, v)
+        })
+        .collect();
+    col.upsert_batch(records).unwrap();
+    col.flush().unwrap();
+
+    let mut total = 0.0;
+    let queries = 30;
+    for _ in 0..queries {
+        let q = random_vec(&mut rng);
+        let hits: Vec<u64> = col
+            .search(&q)
+            .k(10)
+            .nprobe(1000)
+            .run()
+            .unwrap()
+            .iter()
+            .map(|h| h.id)
+            .collect();
+        let truth = flat_topk(data.iter().map(|(i, v)| (*i, v)), &q, 10, |_| true);
+        total += recall(&hits, &truth);
+    }
+    let avg = total / queries as f64;
+    assert!(
+        avg >= 0.85,
+        "4bit ivfpq+opq full-probe recall@10 = {avg:.3}"
+    );
+}

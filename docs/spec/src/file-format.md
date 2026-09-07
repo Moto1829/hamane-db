@@ -131,8 +131,10 @@ min/max は全次元共通 (グローバルスケール)。
 
 ```text
 header (64B): magic, dim u32, count u64, m u32, nbits u8, ksub u32, pad
-codebook: m × ksub × dsub × f32   (dsub = dim / m、nbits=8 なので ksub=256)
-codes:    count × m × u8          (行 → m 個のサブコード)
+codebook: m × ksub × dsub × f32   (dsub = dim / m、ksub = 2^nbits)
+codes:    count × ceil(m × nbits / 8) × u8
+          (nbits=8 は 1 サブコード 1 バイト、nbits=4 は 2 個で 1 バイト。
+           4bit は偶数 j が下位ニブル)
 footer crc32c
 ```
 
@@ -155,7 +157,7 @@ centroids: nlist × dim × f32
 codebook:  m × ksub × dsub × f32  (残差空間の共有コードブック)
 offsets:   (nlist+1) × u64
 entries:   count × u32
-codes:     count × m × u8         (entries と同順)
+codes:     count × ceil(m × nbits / 8) × u8   (entries と同順)
 footer crc32c
 ```
 

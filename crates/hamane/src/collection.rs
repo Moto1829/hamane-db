@@ -16,6 +16,18 @@ const MAX_OVERSAMPLE: f32 = 4.0;
 /// 量子化 (SQ8/PQ) の 2 段階検索で、量子化距離により取得する候補の倍率
 /// (todo 602 / 1003)。この件数を f32 で再ランクして上位 k を返す
 const RERANK_FACTOR: usize = 4;
+/// 4-bit PQ の再ランク候補倍率 (todo 1202)。サブコードが 16 通りしかなく
+/// 1 段目の順位付けが粗いので、候補を広めに取ってから f32 で並べ直す。
+const RERANK_FACTOR_4BIT: usize = 8;
+
+/// 量子化のサブコード幅から再ランク候補の倍率を決める。
+fn rerank_factor(nbits: u8) -> usize {
+    if nbits <= 4 {
+        RERANK_FACTOR_4BIT
+    } else {
+        RERANK_FACTOR
+    }
+}
 
 /// Collection 作成時の設定。次元数と距離関数は作成後変更できない。
 #[derive(Debug, Clone, Copy)]
@@ -381,7 +393,7 @@ impl SegmentSearch {
             }
             // 量子化距離で k×RERANK に絞り、f32 で再ランクして上位 k
             cand.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("keys are finite"));
-            cand.truncate(k * RERANK_FACTOR);
+            cand.truncate(k * rerank_factor(ivfpq.nbits()));
             let mut reranked: Vec<(f32, Id)> = cand
                 .iter()
                 .map(|&(_, row)| (metric.distance_key(query, seg.vector(row)), seg.id(row)))
@@ -426,7 +438,16 @@ impl SegmentSearch {
                 let dist =
                     |row: u32| -> f32 { sq8.distance_key(metric, &query_codes, code_sum, row) };
                 return Ok(two_stage_search(
-                    &hview, n, &dist, &live, seg, query, k, ef, metric,
+                    &hview,
+                    n,
+                    &dist,
+                    &live,
+                    seg,
+                    query,
+                    k,
+                    ef,
+                    metric,
+                    RERANK_FACTOR,
                 ));
             }
             if let Some(pq) = seg.pq_view() {
@@ -436,7 +457,16 @@ impl SegmentSearch {
                 let lut = pq.build_lut(rotated.as_deref().unwrap_or(query), metric);
                 let dist = |row: u32| -> f32 { pq.distance_key(&lut, row) };
                 return Ok(two_stage_search(
-                    &hview, n, &dist, &live, seg, query, k, ef, metric,
+                    &hview,
+                    n,
+                    &dist,
+                    &live,
+                    seg,
+                    query,
+                    k,
+                    ef,
+                    metric,
+                    rerank_factor(pq.nbits()),
                 ));
             }
             let hits = search_hnsw(&hview, seg, metric, query, k, ef, Some(&live));
@@ -501,8 +531,9 @@ fn two_stage_search(
     k: usize,
     ef: usize,
     metric: Metric,
+    rerank: usize,
 ) -> Vec<(f32, Id)> {
-    let fetch = k * RERANK_FACTOR;
+    let fetch = k * rerank;
     let hits = search_hnsw_by(hview, n, dist, fetch, ef.max(fetch), Some(live));
     let mut reranked: Vec<(f32, Id)> = hits
         .into_iter()
