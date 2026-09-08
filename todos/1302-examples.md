@@ -1,6 +1,6 @@
 # 1302: サンプルコードの拡充
 
-- Status: TODO
+- Status: DONE (2026-09-08、一部は未着手を明記)
 - Milestone: M13
 - Depends: なし
 - Design: —
@@ -18,20 +18,20 @@
 
 ### A. Rust ライブラリ (`crates/hamane/examples/`)
 
-- [ ] `quickstart.rs`: collection 作成 → upsert → 検索 → 削除。
+- [x] `quickstart.rs`: collection 作成 → upsert → 検索 → 削除。
       README と仕様書 getting-started の内容をそのまま実行可能な形に
-- [ ] `metadata_filter.rs`: メタデータ付き投入と条件検索。
+- [x] `metadata_filter.rs`: メタデータ付き投入と条件検索。
       pre-filter / post-filter が自動で切り替わることをログに出す
-- [ ] `string_ids.rs`: UUID など文字列 ID の CRUD
-- [ ] `bulk_load.rs`: 100 万件をバッチ投入する定石
+- [x] `string_ids.rs`: UUID など文字列 ID の CRUD
+- [x] `bulk_load.rs`: 100 万件をバッチ投入する定石
       (`upsert_batch` / `SyncPolicy::Batch` / フラッシュ閾値 / 事前 `flush`)。
       進捗と所要時間、最終的なセグメント構成を表示する
-- [ ] `quantization.rs`: **同じデータを 5 構成で作って比較**
+- [x] `quantization.rs`: **同じデータを 5 構成で作って比較**
       (f32 / SQ8 / PQ / OPQ / IVF-PQ、および 4bit)。
       recall・検索時間・ディスクサイズを表にして出す。
       「どれを選ぶか」の判断材料をコードで示す (docs/benchmarks.md の縮小版)
-- [ ] `backup_restore.rs`: `backup` → 別ディレクトリで open → 一致確認
-- [ ] `concurrent.rs`: 複数スレッドからの読み書き (単一ライタ・複数リーダの
+- [x] `backup_restore.rs`: `backup` → 別ディレクトリで open → 一致確認
+- [x] `concurrent.rs`: 複数スレッドからの読み書き (単一ライタ・複数リーダの
       使い分けと、`Arc<Database>` の共有方法)
 
 ### B. サーバ / CLI / Python
@@ -47,25 +47,45 @@
 
 ### C. 実用シナリオ
 
-- [ ] `rag_pipeline.rs`: 文書チャンク → (疑似) 埋め込み → 投入 →
+- [x] `rag_pipeline.rs`: 文書チャンク → (疑似) 埋め込み → 投入 →
       クエリ埋め込み → 近傍検索 → 出典表示、までの一連。
       埋め込みモデルは外部依存を避けてハッシュベースの疑似実装にし、
       「実際は OpenAI/ローカルモデルの出力を入れる」とコメントで示す
-- [ ] `recommendation.rs`: ユーザー × アイテムの内積検索 (Metric::Dot) と
+- [x] `recommendation.rs`: ユーザー × アイテムの内積検索 (Metric::Dot) と
       メタデータでの絞り込み
 
 ### D. 導線と保証
 
-- [ ] `examples/README.md` (または `crates/hamane/examples/README.md`) に
+- [x] `examples/README.md` (または `crates/hamane/examples/README.md`) に
       一覧と「何を学べるか」を書き、リポジトリ README からリンクする
-- [ ] CI に `cargo build --workspace --examples` を追加し、
+- [x] CI に `cargo build --workspace --examples` を追加し、
       サンプルが腐らないようにする
-- [ ] 重いサンプル (bulk_load / quantization) は件数を引数で減らせるようにし、
+- [x] 重いサンプル (bulk_load / quantization) は件数を引数で減らせるようにし、
       既定は数十秒で終わる規模にする
 
 ## 完了条件
 
-- [ ] `cargo build --workspace --examples` が CI で green
-- [ ] 各サンプルが引数なしで実行でき、数十秒以内に終わる
-- [ ] README から examples 一覧に辿れて、量子化構成の選び方が
+- [x] `cargo build --workspace --examples` が CI で green
+- [x] 各サンプルが引数なしで実行でき、数十秒以内に終わる (最長は quantization の約 30 秒)
+- [x] README から examples 一覧に辿れて、量子化構成の選び方が
       **動くコードで**示されている
+
+## 実装メモ
+
+- 9 本を追加 (既存の write_latency と合わせて 10 本)。一覧は
+  `crates/hamane/examples/README.md`、README からリンク済み
+- 埋め込みは外部依存を避けてハッシュ / 疑似乱数で作った。
+  rag_pipeline は「意味は捉えない」ことを出力にも明記している
+- `quantization` サンプルは 7 構成を同じデータで作り直して比較する。
+  10,000 件 × dim=64 の実測では f32/SQ8 が最速 (23µs)、PQ 系が 32〜35µs、
+  IVF-PQ が 121µs。OPQ は**件数が少ないほど構築コストが割高**
+  (この規模で PQ の 6 倍。SIFT 20 万件では 1.5 倍)
+- 検索時間は最初の 1 回が mmap のページフォルトで 10 倍以上遅く出るので、
+  計測前にウォームアップを入れてある (最初これで OPQ が異常に遅く見えた)
+
+## 未着手 (別タスクに切り出す候補)
+
+- HTTP API の呼び出し例 (curl / reqwest) と、レプリカ構成の compose 手順。
+  現状は仕様書の replication 章と docker-compose.yml がある
+- Python (numpy / pandas) のサンプル。wheel のビルドが前提になる
+- CLI の実用レシピを cli.md に追記

@@ -27,6 +27,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Format
         run: cargo fmt --check
+      - name: Examples (compile only, todo 1302)
+        run: cargo build --workspace --examples
       - name: Check Python bindings (compile only)
         run: cargo check --manifest-path crates/hamane-py/Cargo.toml
 
