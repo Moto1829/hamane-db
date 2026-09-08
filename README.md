@@ -16,6 +16,9 @@ Rust 製の組み込み型ベクトルデータベースエンジン。
 - **距離**: L2 / コサイン / 内積 (NEON / AVX2 の SIMD カーネル)
 - **インターフェース**: Rust ライブラリ / CLI / HTTP サーバ / Python (pyo3)
 
+- **サンプル**: [crates/hamane/examples/](crates/hamane/examples/) —
+  quickstart / フィルタ / 大量投入 / **量子化構成の比較** / バックアップ /
+  並行アクセス / RAG / 推薦 (`cargo run --example quickstart`)
 - **仕様書**: [docs/spec/](docs/spec/) (mdBook。`mdbook serve docs/spec` でローカル閲覧、
   GitHub Pages で公開)
 - 設計の背景: [docs/DESIGN.md](docs/DESIGN.md) / 実装タスク: [todos/](todos/)
