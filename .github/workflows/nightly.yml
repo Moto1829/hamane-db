@@ -1,0 +1,42 @@
+name: Nightly
+
+# 通常の CI (ci.yml) は数分で終わる範囲だけを回す。
+# 大量データ E2E (#[ignore] 付き、todo 1301) はここで 1 日 1 回まわす。
+on:
+  schedule:
+    - cron: "0 18 * * *" # 03:00 JST
+  workflow_dispatch:
+    inputs:
+      scale_n:
+        description: "大量データテストの件数 (HAMANE_SCALE_N)"
+        required: false
+        default: "1000000"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  scale:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Ignored tests (large data E2E)
+        # release でないと HNSW 構築が桁違いに遅い
+        run: cargo test --release --workspace -- --ignored --test-threads=1 --nocapture
+        env:
+          HAMANE_SCALE_N: ${{ github.event.inputs.scale_n || '1000000' }}
+
+  full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: All tests (release)
+        run: cargo test --release --workspace
+      - name: Examples build
+        run: cargo build --release --workspace --examples
