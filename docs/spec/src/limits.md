@@ -40,6 +40,30 @@ v0.3 (M7 完了) 時点の制約です。
 - IVF / IVF-PQ は `nprobe` 個のクラスタしか走査しないため、クラスタ境界付近の
   近傍を取りこぼし得る。`nprobe` を上げると改善する
 
+## in-memory モードの制約
+
+`Database::in_memory()` は「永続化しないモード」であると同時に
+「**索引を作らないモード**」です。API は `Database::open` と同一ですが、
+検索の性能特性は大きく異なります。
+
+- **HNSW / IVF が構築されない**。索引はフラッシュ時のセグメント構築で
+  作られるが、in-memory ではセグメントが 1 つも作られないため、検索は
+  memtable の総当たり (Flat) 走査になる。1 クエリあたり O(件数 × 次元) で、
+  件数が増えるほど `Database::open` との差が開く
+- **量子化 (SQ8 / PQ / OPQ / IVF-PQ) が効かない**。いずれもセグメント側の
+  機能のため
+- **セグメント並列検索が働かない**。走査対象が memtable ひとつだけのため
+- **`StoreOptions` を指定できない**。`open_with_options` に相当する API が
+  なく、常に既定値が使われる
+- **`flush()` / `compact()` は no-op**、`backup()` は `InvalidConfig`
+  エラーになる。レプリケーション (follower) も利用不可
+- 全データがプロセスのメモリに載り続ける。`flush_threshold_bytes` を
+  超えても何も起きないため、実質の上限は実メモリのみ
+
+永続化は不要でも ANN の性能が必要な場合は、tmpfs (Linux の `/dev/shm` など)
+上のディレクトリを `Database::open` で開くのが現状の回避策です。この構成なら
+HNSW も量子化も通常どおり機能します。
+
 ## 運用の制約
 
 - `StoreOptions` は永続化されず、open のたびに指定が必要。

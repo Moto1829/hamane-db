@@ -80,9 +80,17 @@ db.flush()?;
 
 ## 同じ API での in-memory 利用
 
-テストや一時的な用途では永続化なしで使えます。
+テストや一時的な用途では、永続化なしの `Database::in_memory()` が使えます。
 
 ```rust
 let db = Database::in_memory();
-// 以降は Database::open と完全に同じ API。flush/compact は no-op
+// 以降は Database::open と同じ API。flush/compact は no-op
 ```
+
+ただし**同じなのは API だけで、検索の性能特性は別物**です。in-memory では
+セグメントが作られないため HNSW も量子化も構築されず、検索は memtable の
+総当たり (Flat) 走査になります。数万件を超える規模で使う前に
+[in-memory モードの制約](limits.md#in-memory-モードの制約) を確認してください。
+
+永続化は不要でも ANN の性能が必要な場合は、tmpfs 上のディレクトリを
+`Database::open` で開くのが現状の回避策です。

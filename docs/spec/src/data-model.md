@@ -16,7 +16,7 @@ Database (= 1 ディレクトリ)
 |---|---|
 | `Database::open(path)` | ディレクトリを開く。なければ初期化。クラッシュ後は自動復旧 |
 | `Database::open_with_options(path, StoreOptions)` | 設定つきで開く |
-| `Database::in_memory()` | 永続化なし。API は同一 |
+| `Database::in_memory()` | 永続化なし。API は同一だが索引は作られない ([制限事項](limits.md#in-memory-モードの制約)) |
 | `create_collection(name, config)` | Collection 作成。同名が存在すればエラー |
 | `collection(name)` | 既存 Collection のハンドル取得 |
 | `drop_collection(name)` | Collection 削除 (データも削除される) |
