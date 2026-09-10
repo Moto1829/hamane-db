@@ -12,13 +12,13 @@
 
 ## やること
 
-- [ ] 選択率推定: セグメントから等間隔 `sample_size=1000` 行の metadata を
+- [x] 選択率推定: セグメントから等間隔 `sample_size=1000` 行の metadata を
       デコードして一致率 s を計算
-- [ ] `s < 0.05` → pre-filter: meta.bin 全走査で一致ビットセット → 一致行のみ Flat
-- [ ] `s ≥ 0.05` → post-filter: `ef' = ef × clamp(1/s, 1, 4)` で HNSW +
+- [x] `s < 0.05` → pre-filter: meta.bin 全走査で一致ビットセット → 一致行のみ Flat
+- [x] `s ≥ 0.05` → post-filter: `ef' = ef × clamp(1/s, 1, 4)` で HNSW +
       filter_mask (一致ビットセットではなく行単位の遅延判定でメタデコードを節約)
-- [ ] memtable は従来どおり逐次フィルタ (Flat)
-- [ ] 閾値・サンプル数は `HnswParams` ではなく内部定数 (公開しない。調整は M4)
+- [x] memtable は従来どおり逐次フィルタ (Flat)
+- [x] 閾値・サンプル数は `HnswParams` ではなく内部定数 (公開しない。調整は M4)
 
 ## 完了条件
 

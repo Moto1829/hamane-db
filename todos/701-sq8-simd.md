@@ -1,6 +1,6 @@
 # 701: SQ8 の u8 SIMD カーネル
 
-- Status: DONE (2026-07-15)
+- Status: DONE (2026-07-15、AVX2 のみ未実装)
 - Milestone: M7
 - Depends: 602
 - Design: crates/hamane-core/src/sq8.rs (602 の残課題)
@@ -12,11 +12,13 @@ SQ8 経路の検索スループットを f32 経路より速くする。
 
 ## やること
 
-- [ ] NEON (aarch64): vabd (絶対差) + vmull_u8 + vpadal の widening 累積
+- [x] NEON (aarch64): vabd (絶対差) + vmull_u8 + vpadal の widening 累積
 - [ ] AVX2 (x86_64): maddubs 系。実行時ディスパッチは f32 カーネルと同じ方式
-- [ ] u32 アキュムレータのオーバーフロー境界 (dim ≤ 66051) を doc に明記
-- [ ] スカラー実装との完全一致テスト (整数演算なので誤差ゼロで比較)
-- [ ] criterion ベンチ (distance.rs に追加) で f32 SIMD と比較
+      → **未実装**。x86_64 は現在スカラーにフォールバックする
+      (検証環境が無いため保留。todos/README.md の将来候補に記載)
+- [x] u32 アキュムレータのオーバーフロー境界 (dim ≤ 66051) を doc に明記
+- [x] スカラー実装との完全一致テスト (整数演算なので誤差ゼロで比較)
+- [x] criterion ベンチ (distance.rs に追加) で f32 SIMD と比較
 
 ## 完了条件
 

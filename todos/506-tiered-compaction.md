@@ -12,17 +12,17 @@
 
 ## やること
 
-- [ ] manifest の `CollectionEntry.segments` を「seg_id 昇順」制約から
+- [x] manifest の `CollectionEntry.segments` を「seg_id 昇順」制約から
       「年代順リスト (古い→新しい)」に変更 (フォーマット version bump v2)。
       部分マージの結果セグメント (新しい seg_id) をマージ元の位置に挿入できる
       ようにする
-- [ ] 旧フォーマット (v1) の読み込み互換を維持 (v1 は昇順 = 年代順なのでそのまま)
-- [ ] tier 分け: record_count を ×4 区切りで階層化し、同 tier に 4 個
+- [x] 旧フォーマット (v1) の読み込み互換を維持 (v1 は昇順 = 年代順なのでそのまま)
+- [x] tier 分け: record_count を ×4 区切りで階層化し、同 tier に 4 個
       たまったら **年代的に連続する** その 4 個をマージ
-- [ ] tombstone の引き継ぎ規則: マージ範囲より古いセグメントが残る場合、
+- [x] tombstone の引き継ぎ規則: マージ範囲より古いセグメントが残る場合、
       範囲内の tombstone は新セグメントに引き継ぐ (401 の設計メモどおり)
-- [ ] proptest (211) の Compact を部分マージ経路が通る形に強化
-- [ ] 長時間書き込みテスト (401 の収束テスト) で write amplification を
+- [x] proptest (211) の Compact を部分マージ経路が通る形に強化
+- [x] 長時間書き込みテスト (401 の収束テスト) で write amplification を
       full merge と比較計測
 
 ## 完了条件

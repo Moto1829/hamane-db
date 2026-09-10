@@ -12,16 +12,16 @@
 
 ## やること
 
-- [ ] `run_search` のセグメントごとの探索を並列化
+- [x] `run_search` のセグメントごとの探索を並列化
       (std::thread::scope。セグメント数は高々 compaction_threshold なので
       スレッドプール不要)
-- [ ] 計測: セグメント 4 個 (コンパクション直前) の状態で並列化前後の
+- [x] 計測: セグメント 4 個 (コンパクション直前) の状態で並列化前後の
       レイテンシを hamane-bench の `--flush-threshold` オプションで比較
-- [ ] `live_len` の O(1) 化: フラッシュ/コンパクション時に「このセグメントの
+- [x] `live_len` の O(1) 化: フラッシュ/コンパクション時に「このセグメントの
       live 行数」を確定できないか検討。厳密な維持が複雑なら、manifest に
       「上限値 (record_count 合計)」と「正確な値のキャッシュ」を持ち、
       dirty なら遅延再計算する方式でよい
-- [ ] `Collection::len()` の doc comment を実装に合わせて更新
+- [x] `Collection::len()` の doc comment を実装に合わせて更新
 
 ## 完了条件
 

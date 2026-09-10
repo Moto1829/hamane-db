@@ -12,15 +12,15 @@ memtable + 複数セグメントにまたがるデータを、更新・削除の
 
 ## やること
 
-- [ ] `LiveView { memtable_snapshot, segments (seg_id 降順) }` と
+- [x] `LiveView { memtable_snapshot, segments (seg_id 降順) }` と
       `is_live(id, source_rank)` (storage.md §7)
-- [ ] `get(id)`: memtable → セグメント降順の優先解決 (tombstone 考慮)
-- [ ] `run_search`: 各ソースで search_flat → newest-wins dedupe → k 件マージ
+- [x] `get(id)`: memtable → セグメント降順の優先解決 (tombstone 考慮)
+- [x] `run_search`: 各ソースで search_flat → newest-wins dedupe → k 件マージ
       (query.md §2 のフロー。dedupe で k 件未満になり得る旨を doc comment に明記)
-- [ ] `len()` の意味を「live なレコード数」に再定義
+- [x] `len()` の意味を「live なレコード数」に再定義
       (manifest の record_count 合計 − 重複 − tombstone。厳密計算が重ければ
       フラッシュ時に確定値を manifest に持たせる)
-- [ ] 検索開始時のスナップショット取得をロック外実行に (query.md §1)
+- [x] 検索開始時のスナップショット取得をロック外実行に (query.md §1)
 
 ## 完了条件
 

@@ -12,13 +12,13 @@ proptest で継続的に検証する。
 
 ## やること
 
-- [ ] 参照モデル: `HashMap<Id, (Vec<f32>, Metadata)>` + 全探索検索
-- [ ] 操作 enum: Upsert / Delete / Flush / Reopen / Search{k, filter} /
+- [x] 参照モデル: `HashMap<Id, (Vec<f32>, Metadata)>` + 全探索検索
+- [x] 操作 enum: Upsert / Delete / Flush / Reopen / Search{k, filter} /
       Get(id) を proptest strategy で生成 (dim 小さめ、id は狭い範囲で衝突させる)
-- [ ] 系列実行後 (および途中の Search/Get ごと) に実装とモデルを比較
+- [x] 系列実行後 (および途中の Search/Get ごと) に実装とモデルを比較
   - Search は「返る id 集合と順序」が一致すること
     (スコア同点の順序は id タイブレークで決定的: hamane-index の HeapEntry 参照)
-- [ ] 失敗時の最小化 (proptest の shrink) が効くよう操作を独立に保つ
+- [x] 失敗時の最小化 (proptest の shrink) が効くよう操作を独立に保つ
 
 ## 完了条件
 

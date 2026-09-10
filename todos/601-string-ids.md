@@ -12,15 +12,15 @@
 
 ## やること
 
-- [ ] 方式を決める。推奨: **内部 ID は u64 のまま**、collection ごとに
+- [x] 方式を決める。推奨: **内部 ID は u64 のまま**、collection ごとに
       「外部文字列 ID → 内部 u64」の辞書を持つ
   - 距離計算・セグメント・HNSW・tombstone は一切変更不要
   - 辞書は WAL に載せ、フラッシュ時にセグメントへ (`extid.bin`:
     ソート済み文字列 + 内部 id のペア)
-- [ ] 公開 API: `Id` を enum にはせず、`Record::new(impl Into<RecordId>, ...)`
+- [x] 公開 API: `Id` を enum にはせず、`Record::new(impl Into<RecordId>, ...)`
       で `u64 | &str | String` を受ける。u64 のみの既存コードは無変更で通る
-- [ ] 文字列 ID 使用時の SearchHit / get の返却 ID の扱いを決めて実装
-- [ ] proptest に文字列 ID の系列を追加
+- [x] 文字列 ID 使用時の SearchHit / get の返却 ID の扱いを決めて実装
+- [x] proptest に文字列 ID の系列を追加
 
 ## 完了条件
 

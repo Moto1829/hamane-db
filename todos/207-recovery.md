@@ -12,13 +12,13 @@
 
 ## やること
 
-- [ ] `Store` (hamane-storage): manifest / segments / WAL を束ねる装置
+- [x] `Store` (hamane-storage): manifest / segments / WAL を束ねる装置
   - `Store::open(db_dir)`: storage.md §5 の手順 1〜5
   - `Store::in_memory()`: WAL/セグメントを持たない空実装 (query.md §3 の方針)
-- [ ] `Database::open(path)` を公開。`Database::in_memory()` は Store::in_memory に委譲
-- [ ] create/drop_collection を WAL 経由に変更 (WalRecord::CreateCollection 等)
-- [ ] upsert/delete を WAL append + sync → memtable の順に変更 (query.md §1)
-- [ ] リプレイ後の WAL 切り詰め (WalReader が返した停止位置で truncate)
+- [x] `Database::open(path)` を公開。`Database::in_memory()` は Store::in_memory に委譲
+- [x] create/drop_collection を WAL 経由に変更 (WalRecord::CreateCollection 等)
+- [x] upsert/delete を WAL append + sync → memtable の順に変更 (query.md §1)
+- [x] リプレイ後の WAL 切り詰め (WalReader が返した停止位置で truncate)
 
 ## 完了条件
 

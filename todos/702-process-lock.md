@@ -12,13 +12,13 @@
 
 ## やること
 
-- [ ] `<db_dir>/LOCK` に flock (排他・非ブロッキング) をかける。
+- [x] `<db_dir>/LOCK` に flock (排他・非ブロッキング) をかける。
       取得できなければ `HamaneError::Locked` (新バリアント) を返す
-- [ ] unix は libc::flock (advisory)。非 unix はフォールバック
+- [x] unix は libc::flock (advisory)。非 unix はフォールバック
       (ベストエフォートであることを doc に明記)
-- [ ] ロックは Store の生存期間中保持し、Drop で解放
+- [x] ロックは Store の生存期間中保持し、Drop で解放
       (flock はプロセス終了・クラッシュで自動解放されるため残骸問題なし)
-- [ ] テスト: 同一プロセス内の二重 open がエラー / drop 後は再 open 可能
+- [x] テスト: 同一プロセス内の二重 open がエラー / drop 後は再 open 可能
 
 ## 完了条件
 

@@ -12,14 +12,14 @@
 
 ## やること
 
-- [ ] `crates/hamane-storage` を workspace に追加 (deps: hamane-core, crc32c, memmap2)
-- [ ] `format` モジュール:
+- [x] `crates/hamane-storage` を workspace に追加 (deps: hamane-core, crc32c, memmap2)
+- [x] `format` モジュール:
   - magic 定数群 (`HAMANEW\x01` 等) と検証関数
   - リトルエンディアン読み書きヘルパ (u32/u64/f32 slice/string)
   - CRC32C フレーミング (`write_framed` / `read_framed`)
-- [ ] `MetaValue` / `Metadata` のバイナリ encode/decode (storage.md §1 の tag 形式)
-- [ ] `Metric` ↔ u8 の変換 (0=L2, 1=Cosine, 2=Dot)
-- [ ] `HamaneError::Corrupted(String)` を hamane-core に追加
+- [x] `MetaValue` / `Metadata` のバイナリ encode/decode (storage.md §1 の tag 形式)
+- [x] `Metric` ↔ u8 の変換 (0=L2, 1=Cosine, 2=Dot)
+- [x] `HamaneError::Corrupted(String)` を hamane-core に追加
 
 ## 完了条件
 

@@ -12,13 +12,13 @@
 
 ## やること
 
-- [ ] `HnswParams.extend_candidates: bool` を追加 (既定は要計測で決定)
-- [ ] SIFT1M で on/off の構築時間と recall を計測して既定値を決める
+- [x] `HnswParams.extend_candidates: bool` を追加 (既定は要計測で決定)
+- [x] SIFT1M で on/off の構築時間と recall を計測して既定値を決める
   - off で recall@10 ≥ 0.95 を維持できるなら既定 off
   - 強クラスタデータ用テスト (recall_at_10_clustered) は on 固定で維持
-- [ ] ef_construction のスイープ (100/200/400) も同時に計測し、
+- [x] ef_construction のスイープ (100/200/400) も同時に計測し、
       速度/再現率のトレードオフを docs/benchmarks.md に記録
-- [ ] StoreOptions 経由で公開 (hamane::HnswParams は再エクスポート済み)
+- [x] StoreOptions 経由で公開 (hamane::HnswParams は再エクスポート済み)
 
 ## 完了条件
 

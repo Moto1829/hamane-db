@@ -12,12 +12,12 @@ memtable が閾値を超えたらセグメントへ吐き出し、WAL を世代�
 
 ## やること
 
-- [ ] `CollectionConfig.flush_threshold_bytes` (既定 64 MiB) 追加
-- [ ] フラッシュ手順 (storage.md §6 の 1〜5) を `Store::flush()` に実装
+- [x] `CollectionConfig.flush_threshold_bytes` (既定 64 MiB) 追加
+- [x] フラッシュ手順 (storage.md §6 の 1〜5) を `Store::flush()` に実装
   - v0 は書き込みスレッド上で同期実行
-- [ ] `Collection::flush()` を公開 API に追加
-- [ ] `Collection::upsert_batch(Vec<Record>)` を追加 (WAL sync 1 回に集約)
-- [ ] 旧 WAL / 旧 manifest の削除は manifest 切り替え成功後
+- [x] `Collection::flush()` を公開 API に追加
+- [x] `Collection::upsert_batch(Vec<Record>)` を追加 (WAL sync 1 回に集約)
+- [x] 旧 WAL / 旧 manifest の削除は manifest 切り替え成功後
 
 ## 完了条件
 

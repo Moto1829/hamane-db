@@ -12,12 +12,12 @@
 
 ## やること
 
-- [ ] `Memtable { upserts, deletes, bytes }` (storage.md §6 の仕様どおり)
+- [x] `Memtable { upserts, deletes, bytes }` (storage.md §6 の仕様どおり)
   - upsert は deletes を打ち消す / delete は upserts を打ち消して marker を残す
   - `bytes`: ベクトル + メタデータの概算 (dim×4 + キー・値長の合計)
-- [ ] 検索用イテレータ `iter() -> (Id, &[f32], &Metadata)` (search_flat に渡せる形)
-- [ ] スナップショット取得 `snapshot() -> MemtableSnapshot` (v0 は clone)
-- [ ] `hamane::Collection` の内部を Memtable に置き換え (公開 API 不変、
+- [x] 検索用イテレータ `iter() -> (Id, &[f32], &Metadata)` (search_flat に渡せる形)
+- [x] スナップショット取得 `snapshot() -> MemtableSnapshot` (v0 は clone)
+- [x] `hamane::Collection` の内部を Memtable に置き換え (公開 API 不変、
       deletes はこの時点では検索に影響しない = 全データが memtable にあるため)
 
 ## 完了条件

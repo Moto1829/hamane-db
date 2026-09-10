@@ -12,12 +12,12 @@ wheel のビルドが通ることも確認する。
 
 ## やること
 
-- [ ] `.github/workflows/ci.yml` に python ジョブを追加 (ubuntu):
+- [x] `.github/workflows/ci.yml` に python ジョブを追加 (ubuntu):
       actions/setup-python → pip install maturin pytest numpy →
       maturin develop --release → pytest crates/hamane-py/tests
-- [ ] wheel ビルド確認: `maturin build --release` が同ジョブで通る
+- [x] wheel ビルド確認: `maturin build --release` が同ジョブで通る
       (公開はしない)
-- [ ] ローカルでも pytest を一度実行して green を確認
+- [x] ローカルでも pytest を一度実行して green を確認
       (venv + maturin develop)
 
 ## 完了条件

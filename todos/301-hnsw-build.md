@@ -11,14 +11,14 @@ memtable / セグメントのどちらからでも構築できるインメモリ
 
 ## やること
 
-- [ ] `HnswParams { m, m0, ef_construction, ef_search, seed }` + Default (index.md の既定値)
-- [ ] `VectorSource` trait (`fn len() -> u32` / `fn vector(row: u32) -> &[f32]`)
-- [ ] `HnswBuilder::build(source, metric, params)`:
+- [x] `HnswParams { m, m0, ef_construction, ef_search, seed }` + Default (index.md の既定値)
+- [x] `VectorSource` trait (`fn len() -> u32` / `fn vector(row: u32) -> &[f32]`)
+- [x] `HnswBuilder::build(source, metric, params)`:
   - レベル抽選 (`-ln(U) * ml`, StdRng seed 固定可)
   - greedy 降下 + `search_layer(q, ef_construction)` (Algorithm 1/2)
   - ヒューリスティック隣接選択 (Algorithm 4) と逆向きエッジの刈り込み
-- [ ] 距離は `Metric::distance_key` のみ使用 (メトリック非依存)
-- [ ] visited 集合はビットセット (`Vec<u64>`)
+- [x] 距離は `Metric::distance_key` のみ使用 (メトリック非依存)
+- [x] visited 集合はビットセット (`Vec<u64>`)
 
 ## 完了条件
 

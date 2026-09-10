@@ -1,6 +1,6 @@
 # 604: Python バインディング
 
-- Status: DONE (2026-07-14)
+- Status: DONE (2026-07-14、CI は ubuntu のみ)
 - Milestone: M6
 - Depends: なし (601 の文字列 ID があると使い勝手が大きく向上)
 - Design: —
@@ -12,9 +12,9 @@
 
 ## やること
 
-- [ ] `crates/hamane-py` (pyo3 + maturin)。numpy 配列 (f32) の
+- [x] `crates/hamane-py` (pyo3 + maturin)。numpy 配列 (f32) の
       ゼロコピー受け渡し (`numpy` クレートの PyReadonlyArray1/2)
-- [ ] API 表面 (Rust API を素直に写像):
+- [x] API 表面 (Rust API を素直に写像):
   ```python
   db = hamane.Database("path")        # または hamane.Database()  (in-memory)
   col = db.create_collection("docs", dim=768, metric="cosine")
@@ -22,9 +22,10 @@
   col.upsert_batch(ids, matrix, metas)      # numpy (n, dim)
   hits = col.search(vec, k=10, ef=64, filter={"eq": ["lang", "ja"]})
   ```
-- [ ] フィルタは CLI と同じ JSON 表現 (dict) を受ける
-- [ ] GIL 解放 (`py.allow_threads`) を検索・upsert_batch で
-- [ ] pytest による結合テスト + CI に maturin ビルドジョブ追加 (Linux/macOS)
+- [x] フィルタは CLI と同じ JSON 表現 (dict) を受ける
+- [x] GIL 解放 (`py.allow_threads`) を検索・upsert_batch で
+- [~] pytest による結合テスト + CI に maturin ビルドジョブ追加 (Linux/macOS)
+      → pytest と CI ジョブは追加済みだが **ubuntu のみ** (macOS は未対応)
 
 ## 完了条件
 
