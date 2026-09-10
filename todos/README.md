@@ -297,6 +297,43 @@ E2E テストは単一プロセス・数千件が中心で、サンプルは性�
 その過程で **`nprobe` が HTTP と CLI に露出していない** 取りこぼし (M10) を発見・修正。
 仕様書に **HTTP API リファレンス章** (`docs/spec/src/http.md`) を新設した。
 
+## M14: メモリ上セグメント (2026-09-11 計画)
+
+設計: [docs/design/in-memory.md](../docs/design/in-memory.md) (1401 で作る)。
+
+`Database::in_memory()` は「永続化しないモード」であると同時に
+「**索引を作らないモード**」になっている。索引 (HNSW / IVF) と量子化
+(SQ8 / PQ / OPQ) はすべて `SegmentWriter::write` の中で構築されるが、
+in-memory ではセグメントが 1 つも作られないため、検索は memtable の
+総当たり (Flat) 走査になる。API は `open` と同一なのに性能特性だけが別物、
+という状態を解消する。
+
+| # | タスク | Depends |
+|---|---|---|
+| [1401](1401-in-memory-design.md) | 設計文書 | — |
+| [1402](1402-segment-backing.md) | セグメント読み出しの backing 抽象化 | 1401 |
+| [1403](1403-segment-writer-split.md) | SegmentWriter のバイト列生成と書き出しの分離 | 1401 |
+| [1404](1404-in-memory-flush.md) | in-memory のフラッシュ・コンパクション経路 | 1402, 1403 |
+| [1405](1405-in-memory-exposure.md) | 露出とドキュメント更新 | 1404 |
+
+見積もりの根拠 (調査済み):
+- 読み出しの mmap 依存は `MappedFile` 1 箇所に閉じており、外に出しているのは
+  `content()` / `verify_checksum()` / `u64_at()` の 3 つだけ。
+  `enum Backing { Mapped(Mmap), Owned(Vec<u8>) }` への差し替えで `Segment`
+  本体は無改造で済む
+- 書き出しは「`Vec<u8>` を組み立てて `write_file_with_crc` に渡す」構造で、
+  ファイルに落とす直前のバイト列が既に手元にある
+- フラッシュとコンパクションは**同じ `SegmentWriter::write` に集約**されており、
+  分岐点は 1 箇所
+- manifest は元々インメモリ状態 (`state.manifest`) を持ち、永続化しているのは
+  `manifest.store(&db_dir)` の 1 行だけ
+
+要注意点: `Segment::open` は vectors.bin のデータ部が 4 バイト境界にあることを
+実行時検査する。`Vec<u8>` が要求するアラインメントは 1 で、4 以上は言語仕様上
+保証されないため、確保方法を 1401 で決める。
+
+非ゴール: メモリ DB の backup、ディスク DB のメモリ読み込み。
+
 将来候補 (未タスク化): crates.io / PyPI 公開 (実装優先のため保留)、
 AVX2 SQ8 カーネル (x86_64 検証環境待ち)、PQ4 の SIMD fast-scan
 (16 エントリ LUT のシャッフル評価。合成 LUT で 8bit 同等までは戻ったので、
