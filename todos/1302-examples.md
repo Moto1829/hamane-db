@@ -1,6 +1,6 @@
 # 1302: サンプルコードの拡充
 
-- Status: DONE (2026-09-08、一部は未着手を明記)
+- Status: DONE (2026-09-10)
 - Milestone: M13
 - Depends: なし
 - Design: —
@@ -36,14 +36,15 @@
 
 ### B. サーバ / CLI / Python
 
-- [ ] `crates/hamane-server/examples/` または `docs/spec/src/` に
+- [x] `crates/hamane-server/examples/` または `docs/spec/src/` に
       **HTTP API の呼び出し例**を curl と Rust (reqwest) の両方で
-- [ ] `examples/replication/`: primary + replica を起動する
+      (`docs/spec/src/http.md` を新設 + `examples/http_client.rs`)
+- [x] `examples/replication/`: primary + replica を起動する
       docker-compose と手順 (既存の docker-compose.yml を出発点に)
-- [ ] `crates/hamane-py/examples/`: numpy 配列からの投入・検索、
-      pandas から流し込む例
-- [ ] CLI の実用レシピを `docs/spec/src/cli.md` に追記
-      (JSONL 生成 → insert → flush → search のワンライナー)
+- [x] `crates/hamane-py/examples/`: numpy 配列からの投入・検索、
+      pandas から流し込む例 (`numpy_pandas.py`)
+- [x] CLI の実用レシピを `docs/spec/src/cli.md` に追記
+      (CSV/埋め込み出力からの投入、バックアップ、jq での後処理)
 
 ### C. 実用シナリオ
 
@@ -83,9 +84,13 @@
 - 検索時間は最初の 1 回が mmap のページフォルトで 10 倍以上遅く出るので、
   計測前にウォームアップを入れてある (最初これで OPQ が異常に遅く見えた)
 
-## 未着手 (別タスクに切り出す候補)
+## 追記 (2026-09-10)
 
-- HTTP API の呼び出し例 (curl / reqwest) と、レプリカ構成の compose 手順。
-  現状は仕様書の replication 章と docker-compose.yml がある
-- Python (numpy / pandas) のサンプル。wheel のビルドが前提になる
-- CLI の実用レシピを cli.md に追記
+B (サーバ / CLI / Python) を完了。作業中に **仕様書に HTTP API の
+リファレンス章が無い**ことに気づいたので `docs/spec/src/http.md` を新設した
+(全エンドポイントの curl 例、認証、エラー、フィルタの JSON 表現)。
+
+さらに **`nprobe` が HTTP にも CLI にも露出していない**ことが判明した
+(M10 で `SearchBuilder::nprobe` を足したときの取りこぼし)。IVF 構成では
+検索ごとの調整ができない状態だったので、両方に追加し回帰テストを置いた
+(`search_accepts_ef_and_nprobe` / `cli_search_accepts_nprobe`)。

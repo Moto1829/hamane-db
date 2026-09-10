@@ -61,6 +61,42 @@ pub fn clustered_dataset(n: u64, dim: usize, seed: u64) -> Vec<(u64, Vec<f32>)> 
         .collect()
 }
 
+/// 低ランク + ノイズの決定的なデータセット (**埋め込みベクトルに近いモデル**)。
+///
+/// `x = A z + ε` (A は dim×rank の固定行列、z は係数、ε は小さいノイズ)。
+/// 実際の埋め込みは高次元でも低次元の多様体の近くに乗るので、こちらの方が
+/// クラスタの塊より現実に近い。**PQ の評価にはこれを使う**:
+/// `clustered_dataset` のように塊が固く分離していると、真の近傍同士が
+/// ほぼ等距離になり、量子化誤差が識別能力を上回ってしまう
+/// (dim=768・10 万件の PQ で recall 0.28 まで落ちた)。
+pub fn low_rank_dataset(n: u64, dim: usize, rank: usize, seed: u64) -> Vec<(u64, Vec<f32>)> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    // 基底 A (dim × rank)
+    let basis: Vec<Vec<f32>> = (0..rank)
+        .map(|_| (0..dim).map(|_| gaussian(&mut rng)).collect())
+        .collect();
+    (0..n)
+        .map(|i| {
+            let coeffs: Vec<f32> = (0..rank).map(|_| gaussian(&mut rng)).collect();
+            let mut v = vec![0.0f32; dim];
+            for (c, base) in coeffs.iter().zip(&basis) {
+                for (x, b) in v.iter_mut().zip(base) {
+                    *x += c * b;
+                }
+            }
+            for x in v.iter_mut() {
+                *x += gaussian(&mut rng) * 0.1; // 多様体から少し外れるぶん
+            }
+            (i, v)
+        })
+        .collect()
+}
+
+/// 平均 0・分散 1 に近い値 (一様乱数 12 個の和 − 6)。
+fn gaussian(rng: &mut StdRng) -> f32 {
+    (0..12).map(|_| rng.random::<f32>()).sum::<f32>() - 6.0
+}
+
 /// 総当たりの正解 top-k (metric に応じたキーの昇順、id でタイブレーク)。
 pub fn flat_topk<'a>(
     data: impl Iterator<Item = (u64, &'a Vec<f32>)>,

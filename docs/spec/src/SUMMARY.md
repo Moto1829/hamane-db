@@ -12,6 +12,7 @@
 - [設定リファレンス](configuration.md)
 - [エラーリファレンス](errors.md)
 - [CLI リファレンス](cli.md)
+- [HTTP API リファレンス](http.md)
 
 # 内部仕様
 

@@ -34,14 +34,25 @@ stdin から 1 行 1 レコードの JSON を読みます (1000 件ごとにバ�
 ```sh
 hamane search <DB_DIR> <COLLECTION> \
     --vector '[0.1,0.2,0.3]' \
-    [--k 10] [--ef 64] [--filter '<FILTER_JSON>'] [--pretty]
+    [--k 10] [--ef 64] [--nprobe 8] [--filter '<FILTER_JSON>'] [--pretty]
 ```
+
+| オプション | 既定 | 意味 |
+|---|---|---|
+| `--k` | 10 | 取得件数 |
+| `--ef` | DB 設定 | HNSW の探索幅。大きいほど高精度・低速 |
+| `--nprobe` | DB 設定 | IVF / IVF-PQ で走査するクラスタ数 |
+| `--filter` | なし | メタデータ条件 (下記の JSON 表現) |
+| `--pretty` | off | 人間向けに整形して出力 |
 
 出力:
 
 ```json
-{"hits": [{"id": 1, "score": 0.98, "meta": {"lang": "ja"}}]}
+{"hits": [{"id": 1, "ext_id": null, "score": 0.98, "meta": {"lang": "ja"}}]}
 ```
+
+`score` は metric に応じた値です (L2 は距離、Cosine は類似度、Dot は内積)。
+文字列 ID のレコードは `ext_id` に元の文字列が入ります。
 
 ### info — 状態表示
 
@@ -90,4 +101,64 @@ hamane search ./db docs --vector '[5,0,0]' --k 3 \
     --filter '{"eq": ["even", true]}' --pretty
 
 hamane info ./db
+```
+
+## レシピ
+
+### CSV から投入する
+
+`jq` で JSONL に変換して `insert` に流し込みます
+(1 行 = `{"id":..,"vector":[..],"meta":{..}}`)。
+
+```sh
+# id,lang,v1,v2,v3 の CSV を JSONL にする
+tail -n +2 data.csv | jq -R -c 'split(",") |
+    {id: (.[0]|tonumber),
+     vector: [.[2],.[3],.[4] | tonumber],
+     meta: {lang: .[1]}}' \
+  | hamane insert ./db docs
+```
+
+### 埋め込みモデルの出力を入れる
+
+多くのモデルは JSON 配列を返すので、そのまま組み立てられます。
+
+```sh
+for f in docs/*.txt; do
+  vec=$(your-embedder "$f")          # 例: [0.12, -0.03, ...]
+  jq -n -c --arg id "$f" --argjson v "$vec" \
+    '{id: $id, vector: $v, meta: {path: $id}}'
+done | hamane insert ./db docs
+hamane flush ./db
+```
+
+### 大量投入のあとに整える
+
+`insert` は 1000 件ごとにまとめて書き込みます。投入後に
+`flush` (セグメント化 + 索引構築) と `compact` (統合) を呼ぶと
+読み取りに最適な形になります。
+
+```sh
+cat records.jsonl | hamane insert ./db docs
+hamane flush ./db
+hamane compact ./db
+hamane info ./db     # セグメント構成を確認
+```
+
+### バックアップを取る
+
+```sh
+hamane backup ./db /backup/hamane-$(date +%Y%m%d)
+# 復元は「そのディレクトリを開くだけ」
+hamane info /backup/hamane-20260910
+```
+
+### 検索結果を後段に渡す
+
+```sh
+# id だけ取り出す
+hamane search ./db docs --vector "$q" --k 5 | jq -r '.hits[].id'
+
+# 文字列 ID (ext_id) を使う
+hamane search ./db docs --vector "$q" --k 5 | jq -r '.hits[] | .ext_id // .id'
 ```

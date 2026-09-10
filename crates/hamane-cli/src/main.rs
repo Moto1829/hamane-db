@@ -64,6 +64,9 @@ enum Command {
         /// HNSW の探索幅 (省略時は既定値)
         #[arg(long)]
         ef: Option<usize>,
+        /// IVF / IVF-PQ で走査するクラスタ数 (省略時は既定値)
+        #[arg(long)]
+        nprobe: Option<usize>,
         /// フィルタ (JSON。例: {"eq":["lang","ja"]}, {"and":[...]})
         #[arg(long)]
         filter: Option<String>,
@@ -135,6 +138,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             vector,
             k,
             ef,
+            nprobe,
             filter,
             pretty,
         } => {
@@ -144,6 +148,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let mut builder = col.search(&query).k(k);
             if let Some(ef) = ef {
                 builder = builder.ef(ef);
+            }
+            if let Some(nprobe) = nprobe {
+                builder = builder.nprobe(nprobe);
             }
             if let Some(f) = &filter {
                 builder = builder.filter(parse_filter(&serde_json::from_str(f)?)?);

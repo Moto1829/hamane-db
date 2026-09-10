@@ -1,0 +1,35 @@
+# primary + read レプリカの最小構成 (todo 1302)。
+# 使い方は README.md を参照。
+services:
+  primary:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    environment:
+      HAMANE_API_KEY: secret
+      HAMANE_LISTEN: 0.0.0.0:8080
+    ports:
+      - "8080:8080"
+    volumes:
+      - primary-data:/data
+
+  replica:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    depends_on:
+      - primary
+    environment:
+      HAMANE_API_KEY: secret
+      HAMANE_LISTEN: 0.0.0.0:8080
+      # これを外して再起動すれば昇格 (docs/design/replication.md)
+      HAMANE_REPLICATE_FROM: http://primary:8080
+      HAMANE_POLL_INTERVAL_MS: "1000"
+    ports:
+      - "8081:8080"
+    volumes:
+      - replica-data:/data
+
+volumes:
+  primary-data:
+  replica-data:

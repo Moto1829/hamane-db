@@ -46,6 +46,12 @@ jobs:
       - name: Build and install bindings
         working-directory: crates/hamane-py
         run: maturin build --release && pip install target/wheels/*.whl
+      # CLI ↔ Python の相互運用テスト (test_interop.py) がバイナリを使う。
+      # 無い場合そのテストは skip されるので、ここで用意しておく
+      - name: Build CLI (for interop tests)
+        run: cargo build --release -p hamane-cli
       - name: Run pytest
         working-directory: crates/hamane-py
         run: pytest tests/ -q
+        env:
+          HAMANE_CLI: ${{ github.workspace }}/target/release/hamane

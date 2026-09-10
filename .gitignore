@@ -26,3 +26,8 @@ target
 
 # Python venv (hamane-py)
 .venv/
+
+# Python (バインディングのローカル環境)
+__pycache__/
+*.pyc
+.pytest_cache/

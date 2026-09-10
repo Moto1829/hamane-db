@@ -287,3 +287,42 @@ async fn health_endpoint_bypasses_auth() {
     );
     assert_eq!(body["status"], "ok");
 }
+
+/// 検索ボディの ef / nprobe が受け付けられること (todo 1301)。
+/// nprobe は M10 で足したとき HTTP に露出し忘れていたので回帰テストを置く。
+#[tokio::test]
+async fn search_accepts_ef_and_nprobe() {
+    let app = test_app();
+    let (status, _) = request(
+        &app,
+        "PUT",
+        "/collections/docs",
+        Some(json!({"dim": 4, "metric": "l2"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let records: Vec<Value> = (0..50u64)
+        .map(|i| json!({"id": i, "vector": [i as f32, 0.0, 0.0, 0.0]}))
+        .collect();
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/collections/docs/records",
+        Some(Value::Array(records)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    for body in [
+        json!({"vector": [10.0, 0.0, 0.0, 0.0], "k": 1}),
+        json!({"vector": [10.0, 0.0, 0.0, 0.0], "k": 1, "ef": 128}),
+        json!({"vector": [10.0, 0.0, 0.0, 0.0], "k": 1, "nprobe": 32}),
+        json!({"vector": [10.0, 0.0, 0.0, 0.0], "k": 1, "ef": 64, "nprobe": 8}),
+    ] {
+        let (status, value) =
+            request(&app, "POST", "/collections/docs/search", Some(body.clone())).await;
+        assert_eq!(status, StatusCode::OK, "body = {body}");
+        assert_eq!(value["hits"][0]["id"].as_u64(), Some(10), "body = {body}");
+    }
+}
