@@ -9,7 +9,7 @@
 //! | POST | /collections/{name}/records | upsert (単発 or 配列) |
 //! | GET | /collections/{name}/records/{id} | 点参照 |
 //! | DELETE | /collections/{name}/records/{id} | レコード削除 |
-//! | POST | /collections/{name}/search | 検索 (vector, k, ef, filter) |
+//! | POST | /collections/{name}/search | 検索 (vector, k, ef, nprobe, filter) |
 //! | POST | /admin/flush | フラッシュ |
 //! | POST | /admin/compact | コンパクション |
 //! | GET | /health | 死活確認 (**認証不要**。orchestrator の probe 用) |
@@ -463,7 +463,10 @@ struct SearchBody {
     vector: Vec<f32>,
     #[serde(default = "default_k")]
     k: usize,
+    /// HNSW の探索幅 (省略時は StoreOptions の既定)
     ef: Option<usize>,
+    /// IVF / IVF-PQ で走査するクラスタ数 (省略時は StoreOptions の既定)
+    nprobe: Option<usize>,
     filter: Option<Value>,
 }
 
@@ -483,6 +486,9 @@ async fn search(
         let mut builder = col.search(&body.vector).k(body.k);
         if let Some(ef) = body.ef {
             builder = builder.ef(ef);
+        }
+        if let Some(nprobe) = body.nprobe {
+            builder = builder.nprobe(nprobe);
         }
         if let Some(f) = filter {
             builder = builder.filter(f);

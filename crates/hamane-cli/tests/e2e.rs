@@ -200,3 +200,54 @@ fn cli_backup_is_a_usable_database() {
         .unwrap();
     assert_eq!(hits[0].id, 299);
 }
+
+/// IVF セグメントに対して CLI から --nprobe を指定できること (todo 1301)。
+/// M10 で nprobe を足したとき CLI と HTTP に露出し忘れていた回帰の防止。
+#[test]
+fn cli_search_accepts_nprobe() {
+    use hamane::{IndexKind, StoreOptions};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    {
+        let db = Database::open_with_options(
+            &path,
+            StoreOptions {
+                index: IndexKind::Ivf,
+                hnsw_min_rows: 64,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let col = db
+            .create_collection(
+                "docs",
+                CollectionConfig {
+                    dim: 4,
+                    metric: Metric::L2,
+                },
+            )
+            .unwrap();
+        let recs: Vec<Record> = (0..2000u64)
+            .map(|i| Record::new(i, vec![i as f32, 0.0, 0.0, 0.0]))
+            .collect();
+        col.upsert_batch(recs).unwrap();
+        col.flush().unwrap();
+    }
+
+    let db_arg = path.to_str().unwrap();
+    // nprobe を大きくすると全クラスタを走査するので必ず真の最近傍が返る
+    let out = run(&[
+        "search",
+        db_arg,
+        "docs",
+        "--vector",
+        "[1000.0,0,0,0]",
+        "--k",
+        "1",
+        "--nprobe",
+        "1000",
+    ]);
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(value["hits"][0]["id"].as_u64(), Some(1000), "got {out}");
+}

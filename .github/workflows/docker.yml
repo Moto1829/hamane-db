@@ -47,3 +47,66 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # イメージが「起動して使える」ことの確認 (todo 1301 C)。
+  # publish 有無にかかわらず必ず走らせる。amd64 だけをローカルに load して叩く
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image (amd64, load to local docker)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: hamane-db:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Run container
+        run: |
+          docker run -d --name hamane-smoke -p 8080:8080 \
+            -e HAMANE_API_KEY=smoke-key hamane-db:smoke
+      - name: Wait for /health (認証不要のはず)
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health | grep -q '"status":"ok"'; then
+              echo "healthy"; exit 0
+            fi
+            sleep 1
+          done
+          echo "server did not become healthy"; docker logs hamane-smoke; exit 1
+      - name: API キーなしは 401
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/collections)
+          test "$code" = "401" || { echo "expected 401, got $code"; exit 1; }
+      - name: 作成 → 投入 → 検索
+        run: |
+          auth='Authorization: Bearer smoke-key'
+          curl -fsS -X PUT -H "$auth" -H 'Content-Type: application/json' \
+            -d '{"dim":4,"metric":"l2"}' http://127.0.0.1:8080/collections/docs
+          curl -fsS -X POST -H "$auth" -H 'Content-Type: application/json' \
+            -d '[{"id":1,"vector":[1,0,0,0]},{"id":2,"vector":[0,1,0,0]}]' \
+            http://127.0.0.1:8080/collections/docs/records
+          curl -fsS -X POST -H "$auth" -H 'Content-Type: application/json' \
+            -d '{"vector":[1,0,0,0],"k":1}' \
+            http://127.0.0.1:8080/collections/docs/search | tee /tmp/search.json
+          grep -q '"id":1' /tmp/search.json
+      - name: 再起動してもデータが残る (volume なしでもコンテナ内 /data に残る)
+        run: |
+          docker restart hamane-smoke
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS -H 'Authorization: Bearer smoke-key' \
+            http://127.0.0.1:8080/collections/docs | grep -q '"len":2'
+      - name: HEALTHCHECK (--healthcheck) が動く
+        run: docker exec hamane-smoke /hamane-server --healthcheck
+      - name: ログ
+        if: always()
+        run: docker logs hamane-smoke || true
+      - name: 後片付け
+        if: always()
+        run: docker rm -f hamane-smoke || true

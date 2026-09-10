@@ -12,7 +12,8 @@ services:
       # 未設定なら認証なしで起動する (起動ログに警告が出る)
       HAMANE_API_KEY: ${HAMANE_API_KEY:-}
 
-  # read レプリカの例 (todo 905)。--scale replica=N で台数を増やせる
+  # read レプリカの例 (todo 905)。動く構成と手順は examples/replication/ にある。
+  # --scale replica=N で台数を増やせる
   # replica:
   #   image: ghcr.io/moto1829/hamane-db:latest
   #   build: .

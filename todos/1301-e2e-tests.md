@@ -1,6 +1,6 @@
 # 1301: E2E テストの拡充 (機能網羅 + 大量データ)
 
-- Status: DONE (2026-09-08、一部は未着手を明記)
+- Status: DONE (2026-09-10)
 - Milestone: M13
 - Depends: なし (M12 までの全機能が対象)
 - Design: —
@@ -59,10 +59,10 @@
       書き込めること (現状は同一プロセス内の `ReplicaSync` テストのみ)
 - [x] **バックアップ → 復元**: `Database::backup` の出力を別ディレクトリで
       open し、全件・検索結果が一致 (書き込み中のバックアップも)
-- [ ] **Python バインディング**: CLI で作った DB を Python から読む
-      (`crates/hamane-py/tests/` に追加)
-- [ ] **Docker イメージのスモーク**: ビルドしたイメージを起動し
-      `/health` と 1 件の upsert/search が通る (CI では docker.yml に相乗り)
+- [x] **Python バインディング**: CLI で作った DB を Python から読む
+      (`crates/hamane-py/tests/test_interop.py`。CLI が無ければ skip)
+- [x] **Docker イメージのスモーク**: ビルドしたイメージを起動し
+      `/health` と 1 件の upsert/search が通る (docker.yml に smoke ジョブを追加)
 
 ### D. 構成の組み合わせ網羅 (`crates/hamane/tests/matrix.rs`)
 
@@ -78,7 +78,8 @@
 - [x] `cargo test --workspace` は現状どおり数分で green (重いものは ignore)
 - [x] `cargo test --workspace -- --ignored` が green (ローカルは 3 万件で検証。
       100 万件は nightly の初回実行で確認する)
-- [ ] nightly ワークフローの初回実行を確認する (追加直後で未実行)
+- [x] nightly ワークフローの初回実行を確認する
+      → **失敗していたので直した** (下記)
 - [x] 上記 A〜D で**新規に見つかった不具合は修正するか、
       再現テストを残したうえで todo に切り出す** (下の実装メモ参照)
 
@@ -100,9 +101,21 @@
 - **不具合は見つからなかった**。既存実装は全構成・プロセス跨ぎ・大量データで
   期待どおり動いた (M11/M12 で見つけたレプリケーションの穴は既に修正済み)
 
+## 追記 (2026-09-10): nightly の初回実行で見つかった問題
+
+初回のスケジュール実行 (1,000,000 件) は **110 分かかった上に失敗**した。
+
+1. **`high_dimension_with_quantization` が recall 0.28 で失敗**。
+   原因は**テストデータの作り方**で、実装ではなかった。`clustered_dataset` は
+   塊が固く分離しているため、件数が増える (= 1 クラスタあたりの点が増える) ほど
+   真の近傍同士がほぼ等距離になり、PQ の量子化誤差が識別能力を上回る。
+   → 埋め込みに近い **低ランク + ノイズ** (`common::low_rank_dataset`) に変更。
+   dim=768・2 万件で f32/SQ8/PQ8/PQ4 の全構成が recall 1.0000 になった
+2. **実行時間**: フラッシュ閾値 8 MiB が細かすぎて、100 万件の投入だけで 18 分
+   (フラッシュ 62 回 + そのたびのコンパクション) かかっていた。
+   → 32 MiB に変更し、規模が効かないテストには件数の上限 (`capped`) を入れた。
+   ローカル実測で 100 万件テストは 222 秒 (recall 1.0000、2 セグメント)
+
 ## 未着手 (別タスクに切り出す候補)
 
-- Python バインディングからの相互運用 E2E (CLI で作った DB を Python で読む)。
-  wheel のビルドが要るので CI の python ジョブに寄せるのが自然
-- Docker イメージのスモークテスト (docker.yml は tag 時のみ実行)
 - nightly の失敗通知 (現状は GitHub の既定通知のみ)

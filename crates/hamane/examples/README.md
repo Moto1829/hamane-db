@@ -16,6 +16,16 @@
 | [recommendation](recommendation.rs) | `cargo run --release --example recommendation` | 内積 (`Metric::Dot`) での推薦、条件による絞り込み、item-to-item |
 | [write_latency](write_latency.rs) | `cargo run --release --example write_latency` | バックグラウンドフラッシュ中の書き込みレイテンシ分布 (性能検証用) |
 
+## 他のインターフェース
+
+| 場所 | 内容 |
+|---|---|
+| [hamane-server/examples/http_client.rs](../../hamane-server/examples/http_client.rs) | HTTP API を Rust (reqwest) から呼ぶ。`cargo run -p hamane-server --example http_client -- <base-url> [api-key]` |
+| [docs/spec の HTTP API リファレンス](../../../docs/spec/src/http.md) | 全エンドポイントの curl 例 |
+| [hamane-py/examples/numpy_pandas.py](../../hamane-py/examples/numpy_pandas.py) | numpy 行列の一括投入、pandas DataFrame からの流し込みと結果の DataFrame 化 |
+| [examples/replication/](../../../examples/replication/) | primary + read レプリカを docker compose で立てて昇格まで試す |
+| [docs/spec の CLI リファレンス](../../../docs/spec/src/cli.md) | CSV/埋め込み出力からの投入、バックアップなどのレシピ |
+
 ## 補足
 
 - **埋め込みは疑似実装**です (`rag_pipeline` / `recommendation`)。外部依存を

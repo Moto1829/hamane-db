@@ -17,7 +17,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use common::{
-    clustered_dataset, dataset, dir_size, flat_topk, random_vec, recall, records, scale_n, Phase,
+    clustered_dataset, dataset, dir_size, flat_topk, low_rank_dataset, random_vec, recall, records,
+    scale_n, Phase,
 };
 use hamane::{CollectionConfig, Database, Metric, Quantization, Record, StoreOptions, SyncPolicy};
 use rand::rngs::StdRng;
@@ -38,10 +39,19 @@ fn bulk_options() -> StoreOptions {
     StoreOptions {
         // fsync はここでの計測対象ではない (耐久性は crash.rs で見ている)
         sync: SyncPolicy::EveryN(u32::MAX),
-        flush_threshold_bytes: 8 * 1024 * 1024,
+        // 複数セグメントを作るために既定 (64 MiB) より小さくする。
+        // ただし小さすぎるとフラッシュとコンパクションの回数が増えて
+        // nightly が何時間もかかる (8 MiB では 100 万件の投入に 18 分かかった)
+        flush_threshold_bytes: 32 * 1024 * 1024,
         hnsw_min_rows: 1024,
         ..Default::default()
     }
+}
+
+/// 実行時間が発散しないように件数へ上限をかける。
+/// `HAMANE_SCALE_N` を上げても、検証内容が変わらないテストは伸ばさない。
+fn capped(fraction: u64, cap: u64) -> u64 {
+    (scale_n() / fraction).clamp(5_000, cap)
 }
 
 /// 100 万件規模を投入し、複数セグメントに分かれた状態で
@@ -128,7 +138,8 @@ fn large_dataset_search_stays_consistent() {
 #[test]
 #[ignore = "大量データ (nightly / --ignored でのみ実行)"]
 fn concurrent_writes_and_searches() {
-    let n = scale_n() / 2;
+    // 並行性の確認が目的なので 20 万件で頭打ち
+    let n = capped(2, 200_000);
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(Database::open_with_options(dir.path(), bulk_options()).unwrap());
     let col = db.create_collection("docs", config()).unwrap();
@@ -195,7 +206,8 @@ fn concurrent_writes_and_searches() {
 #[test]
 #[ignore = "大量データ (nightly / --ignored でのみ実行)"]
 fn mixed_workload_matches_reference_model() {
-    let n = scale_n() / 2;
+    // 参照モデルとの一致が目的なので 20 万 ID・40 万操作で頭打ち
+    let n = capped(2, 200_000);
     let ops = n * 2;
     let dir = tempfile::tempdir().unwrap();
     let db = Database::open_with_options(dir.path(), bulk_options()).unwrap();
@@ -279,7 +291,8 @@ fn mixed_workload_matches_reference_model() {
 #[test]
 #[ignore = "大量データ (nightly / --ignored でのみ実行)"]
 fn compaction_keeps_disk_bounded() {
-    let n = (scale_n() / 10).max(5_000);
+    // 6 ラウンド上書きするので件数は 2 万で頭打ち
+    let n = capped(10, 20_000);
     let dir = tempfile::tempdir().unwrap();
     let db = Database::open_with_options(
         dir.path(),
@@ -324,8 +337,11 @@ fn compaction_keeps_disk_bounded() {
 #[ignore = "大量データ (nightly / --ignored でのみ実行)"]
 fn high_dimension_with_quantization() {
     const HIGH_DIM: usize = 768;
-    let n = (scale_n() / 10).max(5_000);
-    let data = clustered_dataset(n, HIGH_DIM, 768);
+    // 高次元の**扱い**を見るテストなので件数は 2 万で頭打ちにする
+    // (dim=768 の PQ 学習は重く、件数を増やしても検証内容は変わらない)
+    let n = (scale_n() / 10).clamp(5_000, 20_000);
+    // 埋め込みに近い低ランク + ノイズ (common::low_rank_dataset のコメント参照)
+    let data = low_rank_dataset(n, HIGH_DIM, 32, 768);
 
     // PQ は 1 段目が粗いぶん閾値を下げる (再ランク後でも取りこぼしはある)。
     // HNSW の並列構築は非決定なので、実測値からマージンを取った下限にする
@@ -396,7 +412,7 @@ fn high_dimension_with_quantization() {
 #[test]
 #[ignore = "大量データ (nightly / --ignored でのみ実行)"]
 fn large_database_reopens_identically() {
-    let n = scale_n() / 2;
+    let n = capped(2, 500_000);
     let dir = tempfile::tempdir().unwrap();
     let data = dataset(n, DIM, 20);
     let queries: Vec<Vec<f32>> = {

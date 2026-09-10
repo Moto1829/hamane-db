@@ -27,3 +27,6 @@ clap = { version = "4", features = ["derive", "env"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tempfile = "3"
+# examples/http_client.rs 用。TLS はリバースプロキシ前提なので
+# default-features = false で rustls/native-tls を持ち込まない
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking"] }
