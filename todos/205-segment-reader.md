@@ -11,9 +11,9 @@
 
 ## やること
 
-- [ ] `Segment::open(dir, seg_id) -> Result<Segment>` (memmap2 で 4 ファイルを map)
+- [x] `Segment::open(dir, seg_id) -> Result<Segment>` (memmap2 で 4 ファイルを map)
   - ヘッダ検証 (magic / version / count 整合)。`verify_checksums()` は別メソッド
-- [ ] アクセサ:
+- [x] アクセサ:
   - `vector(row) -> &[f32]` (アラインメント検証つき。ずれていたら Corrupted)
   - `id(row) -> Id` / `row_of(id) -> Option<u32>` (索引の二分探索)
   - `metadata(row) -> Result<Metadata>` (blob をその場でデコード)
@@ -21,7 +21,7 @@
   - `iter()` — search_flat に渡せる `(Id, &[f32], &Metadata)` 走査
     (Metadata はデコード済みを都度返すため所有型を工夫: 行ごとにデコードして
     クロージャに渡す visitor 形式でも可)
-- [ ] `Segment` は `Send + Sync`。`Arc<Segment>` で共有する前提の設計
+- [x] `Segment` は `Send + Sync`。`Arc<Segment>` で共有する前提の設計
 
 ## 完了条件
 

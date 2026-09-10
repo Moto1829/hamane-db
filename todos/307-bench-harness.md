@@ -12,12 +12,12 @@
 
 ## やること
 
-- [ ] `crates/hamane-bench` (または hamane-cli のサブコマンド) を追加。CI 対象外
-- [ ] SIFT1M (.fvecs/.ivecs) のダウンロード (スクリプト) とパーサ
-- [ ] 計測: 全件 upsert (+flush) → 10k クエリで recall@10 / QPS (単一スレッド &
+- [x] `crates/hamane-bench` (または hamane-cli のサブコマンド) を追加。CI 対象外
+- [x] SIFT1M (.fvecs/.ivecs) のダウンロード (スクリプト) とパーサ
+- [x] 計測: 全件 upsert (+flush) → 10k クエリで recall@10 / QPS (単一スレッド &
       並列) / 構築時間 / ディスクサイズ を表形式で出力
-- [ ] ef_search ∈ {16, 32, 64, 128, 256} のスイープ
-- [ ] 結果を `docs/benchmarks.md` に記録するテンプレート
+- [x] ef_search ∈ {16, 32, 64, 128, 256} のスイープ
+- [x] 結果を `docs/benchmarks.md` に記録するテンプレート
 
 ## 完了条件
 

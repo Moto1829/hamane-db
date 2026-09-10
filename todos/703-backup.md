@@ -12,15 +12,15 @@
 
 ## やること
 
-- [ ] `Store::backup(dest_dir)`: flush (未フラッシュ分をセグメント化) した後、
+- [x] `Store::backup(dest_dir)`: flush (未フラッシュ分をセグメント化) した後、
       state ロックを保持して CURRENT / MANIFEST / 全セグメントファイルを
       dest へコピーする
   - ロック保持中は書き込みが待たされる (コピーは I/O のみで HNSW 構築より
     はるかに短い)。この制約を doc に明記
   - WAL はコピーしない (flush 直後なので空。バックアップは manifest 完結)
-- [ ] dest が空でない場合はエラー (誤上書き防止)
-- [ ] `Database::backup(dest)` を公開、CLI に `hamane backup <db> <dest>` 追加
-- [ ] テスト: バックアップ → 元 DB に追記 → バックアップを open すると
+- [x] dest が空でない場合はエラー (誤上書き防止)
+- [x] `Database::backup(dest)` を公開、CLI に `hamane backup <db> <dest>` 追加
+- [x] テスト: バックアップ → 元 DB に追記 → バックアップを open すると
       バックアップ時点の内容 (追記なし) が見える / CRC 検証込みで開ける
 
 ## 完了条件

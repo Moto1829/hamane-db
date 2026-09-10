@@ -12,13 +12,13 @@ mmap ビューで探索できるようにする。
 
 ## やること
 
-- [ ] `HnswBuilder::serialize(writer)`: index.md §3 の CSR レイアウト
+- [x] `HnswBuilder::serialize(writer)`: index.md §3 の CSR レイアウト
       (header 64B pad / levels / 層ごとの node_ids + offsets + neighbor_ids / CRC)
-- [ ] `HnswView::open(mmap 領域)`: ヘッダ検証 + 各配列へのオフセット解決のみ
+- [x] `HnswView::open(mmap 領域)`: ヘッダ検証 + 各配列へのオフセット解決のみ
       (コピーなし。u32 アラインメント検証)
-- [ ] `HnswView` に `HnswGraph` trait (302) を実装
+- [x] `HnswView` に `HnswGraph` trait (302) を実装
   - 層内の `neighbors(level, node)`: node_ids の二分探索 → offsets → slice
-- [ ] hamane-storage の `Segment` に hnsw.bin の有無を扱うフィールド追加は
+- [x] hamane-storage の `Segment` に hnsw.bin の有無を扱うフィールド追加は
       305 で行う (このタスクはフォーマットとビューまで)
 
 ## 完了条件

@@ -12,9 +12,9 @@
 
 ## やること
 
-- [ ] `crates/hamane-server` (axum + tokio)。Store は Send+Sync 済みなので
+- [x] `crates/hamane-server` (axum + tokio)。Store は Send+Sync 済みなので
       Arc<Database> を共有するだけ。ブロッキング呼び出しは spawn_blocking で
-- [ ] エンドポイント (JSON):
+- [x] エンドポイント (JSON):
   - `PUT /collections/{name}` (dim, metric)
   - `DELETE /collections/{name}` / `GET /collections`
   - `POST /collections/{name}/records` (単発・バッチ upsert)
@@ -22,9 +22,9 @@
   - `POST /collections/{name}/search` (vector, k, ef, filter — CLI と同じ
     フィルタ JSON 表現を共有クレート化して流用)
   - `POST /admin/flush` / `POST /admin/compact`
-- [ ] エラーの HTTP ステータス対応 (DimensionMismatch → 400 等)
-- [ ] グレースフルシャットダウン (flush してから終了)
-- [ ] 結合テスト: サーバを起動して reqwest で一連の CRUD + 検索
+- [x] エラーの HTTP ステータス対応 (DimensionMismatch → 400 等)
+- [x] グレースフルシャットダウン (flush してから終了)
+- [x] 結合テスト: サーバを起動して reqwest で一連の CRUD + 検索
 
 ## 完了条件
 

@@ -12,14 +12,14 @@
 
 ## やること
 
-- [ ] `SegmentWriter`: `record_count >= hnsw_min_rows` (既定 1024) なら
+- [x] `SegmentWriter`: `record_count >= hnsw_min_rows` (既定 1024) なら
       構築して hnsw.bin を書く。seed は seg_id (決定的構築)
-- [ ] `Segment::open`: hnsw.bin があれば `HnswView` を保持
-- [ ] `run_search` のソース別プラン (query.md §2 の 3):
+- [x] `Segment::open`: hnsw.bin があれば `HnswView` を保持
+- [x] `run_search` のソース別プラン (query.md §2 の 3):
       hnsw あり → HNSW(ef) / なし → Flat
-- [ ] `SearchBuilder::ef(usize)` を公開 API に追加 (既定は params の ef_search)
-- [ ] `CollectionConfig.hnsw: HnswParams` を追加 (Default 維持)
-- [ ] 再現率の統合テスト: flush を挟んだ Collection 全体で recall@10 ≥ 0.95
+- [x] `SearchBuilder::ef(usize)` を公開 API に追加 (既定は params の ef_search)
+- [x] `CollectionConfig.hnsw: HnswParams` を追加 (Default 維持)
+- [x] 再現率の統合テスト: flush を挟んだ Collection 全体で recall@10 ≥ 0.95
       (memtable 分は正確なので、セグメント分のみの検証にもなる)
 
 ## 完了条件

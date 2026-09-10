@@ -11,13 +11,13 @@
 
 ## やること
 
-- [ ] criterion ベンチ (`crates/hamane-core/benches/distance.rs`):
+- [x] criterion ベンチ (`crates/hamane-core/benches/distance.rs`):
       l2_squared / dot、dim ∈ {64, 128, 768, 1536}
-- [ ] aarch64: NEON intrinsics (`vfmaq_f32`)、x86_64: AVX2+FMA
+- [x] aarch64: NEON intrinsics (`vfmaq_f32`)、x86_64: AVX2+FMA
       (`is_x86_feature_detected!` で実行時ディスパッチ)。フォールバックは現行実装
-- [ ] unsafe 境界は距離カーネル内に閉じ込め、スカラー実装との一致を
+- [x] unsafe 境界は距離カーネル内に閉じ込め、スカラー実装との一致を
       proptest で検証 (許容誤差 1e-4 相対)
-- [ ] 現行の 4 レーン展開比で dim=768 において 2 倍以上を目標に計測・記録
+- [x] 現行の 4 レーン展開比で dim=768 において 2 倍以上を目標に計測・記録
 
 ## 完了条件
 

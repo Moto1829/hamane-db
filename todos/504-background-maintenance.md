@@ -16,19 +16,19 @@
 
 ## やること
 
-- [ ] immutable memtable の導入 (storage.md §6 の元設計):
+- [x] immutable memtable の導入 (storage.md §6 の元設計):
       閾値到達時はアクティブ memtable を immutable に切り替えて新 WAL を開くだけ
       にし (短い臨界区間)、セグメント書き出しはメンテナンススレッドが行う
-- [ ] `StoreState` を「書き込み状態 (active memtable + WAL)」と
+- [x] `StoreState` を「書き込み状態 (active memtable + WAL)」と
       「世代状態 (immutable + segments + manifest)」に分離し、
       LiveView は immutable memtable もソースに含める
       (rank: active=0, immutable=1, segments=2..)
-- [ ] コンパクションも同じメンテナンススレッドで実行
+- [x] コンパクションも同じメンテナンススレッドで実行
       (フラッシュ → 閾値判定 → コンパクションの直列パイプライン)
-- [ ] エラー処理: メンテナンス失敗は次回リトライ。WAL が残っている限り
+- [x] エラー処理: メンテナンス失敗は次回リトライ。WAL が残っている限り
       データは失われないことをテストで確認
-- [ ] `Database::close()` (または Drop) でメンテナンススレッドを flush して join
-- [ ] 書き込み停止時間の計測: フラッシュを跨ぐ upsert のレイテンシ p99 を
+- [x] `Database::close()` (または Drop) でメンテナンススレッドを flush して join
+- [x] 書き込み停止時間の計測: フラッシュを跨ぐ upsert のレイテンシ p99 を
       ベンチに追加
 
 ## 完了条件

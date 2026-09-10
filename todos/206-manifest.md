@@ -12,13 +12,13 @@
 
 ## やること
 
-- [ ] `Manifest` 構造体 (gen, next_collection_id, next_seg_id, wal_seq,
+- [x] `Manifest` 構造体 (gen, next_collection_id, next_seg_id, wal_seq,
       collections[…segments]) と encode/decode (CRC つき)
-- [ ] `Manifest::store(db_dir)`:
+- [x] `Manifest::store(db_dir)`:
   1. `MANIFEST-<gen+1>` 書き込み + fsync
   2. `CURRENT.tmp` → fsync → `rename(CURRENT)` → 親ディレクトリ fsync
-- [ ] `Manifest::load(db_dir)`: CURRENT → manifest 読み込み + CRC 検証
-- [ ] 掃除: CURRENT が指さない MANIFEST / `.tmp` 残骸の削除 (`gc()`)
+- [x] `Manifest::load(db_dir)`: CURRENT → manifest 読み込み + CRC 検証
+- [x] 掃除: CURRENT が指さない MANIFEST / `.tmp` 残骸の削除 (`gc()`)
 
 ## 完了条件
 

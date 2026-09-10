@@ -12,15 +12,15 @@ f32 ベクトルを次元ごとの min/max で u8 に量子化し、ディスク
 
 ## やること
 
-- [ ] セグメントに `vectors_sq8.bin` を追加 (ヘッダに次元ごとの min/max、
+- [x] セグメントに `vectors_sq8.bin` を追加 (ヘッダに次元ごとの min/max、
       本体は count × dim × u8)。元の vectors.bin も残す (再ランク・再構築用)
-- [ ] u8 同士の距離カーネル (L2/dot) を hamane-core に追加 (SIMD:
+- [x] u8 同士の距離カーネル (L2/dot) を hamane-core に追加 (SIMD:
       NEON `vdotq` 系 / AVX2 `maddubs` 系。まずスカラーで正しく)
-- [ ] HNSW 探索を SQ8 距離で行い、上位 `k × rerank_factor` (既定 4) を
+- [x] HNSW 探索を SQ8 距離で行い、上位 `k × rerank_factor` (既定 4) を
       f32 で再ランクして top-k を返す 2 段階検索
-- [ ] `CollectionConfig` ではなく `StoreOptions.quantization: Option<Sq8Config>`
+- [x] `CollectionConfig` ではなく `StoreOptions.quantization: Option<Sq8Config>`
       で有効化 (既定 off。フォーマット互換を保つ)
-- [ ] SIFT1M で recall / QPS / ディスクサイズを on/off 比較して
+- [x] SIFT1M で recall / QPS / ディスクサイズを on/off 比較して
       docs/benchmarks.md に記録
 
 ## 完了条件

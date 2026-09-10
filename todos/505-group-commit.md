@@ -12,14 +12,14 @@
 
 ## やること
 
-- [ ] `SyncPolicy::Batch { max_delay: Duration }`: 書き込みは fsync 待ちの
+- [x] `SyncPolicy::Batch { max_delay: Duration }`: 書き込みは fsync 待ちの
       キューに入り、直近の fsync から max_delay 以内にまとめて 1 回 fsync。
       **fsync 完了までは呼び出し元に Ok を返さない** (= ack 済みは常に永続)
-- [ ] 実装: fsync 専用スレッド + condvar。呼び出し元は自分の書き込みを含む
+- [x] 実装: fsync 専用スレッド + condvar。呼び出し元は自分の書き込みを含む
       fsync 世代の完了を待つ
-- [ ] ベンチ: 並行 8 スレッドの upsert スループットを Always / Batch(1ms) /
+- [x] ベンチ: 並行 8 スレッドの upsert スループットを Always / Batch(1ms) /
       EveryN で比較し docs/benchmarks.md に記録
-- [ ] WAL 切り詰めテスト (210) が Batch でも green なことを確認
+- [x] WAL 切り詰めテスト (210) が Batch でも green なことを確認
       (ack 済みレコードが必ず復元される)
 
 ## 完了条件
