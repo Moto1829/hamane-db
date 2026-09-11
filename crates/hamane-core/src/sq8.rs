@@ -436,6 +436,13 @@ mod tests {
     #[test]
     fn avx2_matches_scalar_exactly() {
         if !std::arch::is_x86_feature_detected!("avx2") {
+            // スキップが黙って通ると「検証したつもり」になる。
+            // GitHub Actions の x86_64 runner は必ず AVX2 を持つので、
+            // CI 上で検出できないならテスト自体が素通りしている証拠として落とす
+            assert!(
+                std::env::var_os("GITHUB_ACTIONS").is_none(),
+                "CI の x86_64 runner で AVX2 が検出されない = この検証が素通りしている"
+            );
             eprintln!("AVX2 非対応の CPU なのでスキップ (Rosetta 等)");
             return;
         }
