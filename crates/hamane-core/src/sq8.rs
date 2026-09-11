@@ -71,6 +71,13 @@ pub fn sq8_l2_accum(a: &[u8], b: &[u8]) -> u64 {
         // Safety: NEON は aarch64 で常に利用可能
         return unsafe { neon::l2_accum(a, b) };
     }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // Safety: 直上で AVX2 の有無を実行時判定している
+            return unsafe { avx2::l2_accum(a, b) };
+        }
+    }
     #[allow(unreachable_code)]
     sq8_l2_accum_scalar(a, b)
 }
@@ -86,6 +93,13 @@ pub fn sq8_dot_accum(a: &[u8], b: &[u8]) -> (u64, u64) {
     {
         // Safety: NEON は aarch64 で常に利用可能
         return unsafe { neon::dot_accum(a, b) };
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // Safety: 直上で AVX2 の有無を実行時判定している
+            return unsafe { avx2::dot_accum(a, b) };
+        }
     }
     #[allow(unreachable_code)]
     sq8_dot_accum_scalar(a, b)
@@ -116,6 +130,96 @@ pub fn sq8_dot_accum_scalar(a: &[u8], b: &[u8]) -> (u64, u64) {
 
 /// NEON 実装 (aarch64、todo 701)。16 lane の u8 を widening 乗算で
 /// u16 → u32 に累積する。整数演算なのでスカラーと**完全一致**する。
+/// AVX2 実装 (x86_64、todos/701)。
+///
+/// u8 の二乗和は `maddubs` が使えない (第 2 オペランドが符号付きなので
+/// 差が 128 以上のときに負と解釈される)。16 ビットへ展開してから
+/// `madd_epi16` で 2 要素ずつ積和する。`Σb` は `sad_epu8` が 8 バイトの
+/// 絶対差和を 64 ビットで返すので、ゼロとの sad をそのまま使う。
+#[cfg(target_arch = "x86_64")]
+mod avx2 {
+    use std::arch::x86_64::*;
+
+    /// 8 本の i32 レーンの総和。
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn hsum_epi32(v: __m256i) -> u64 {
+        let hi = _mm256_extracti128_si256(v, 1);
+        let lo = _mm256_castsi256_si128(v);
+        let sum4 = _mm_add_epi32(lo, hi);
+        let sum2 = _mm_add_epi32(sum4, _mm_shuffle_epi32(sum4, 0b_00_00_11_10));
+        let sum1 = _mm_add_epi32(sum2, _mm_shuffle_epi32(sum2, 0b_00_00_00_01));
+        _mm_cvtsi128_si32(sum1) as u32 as u64
+    }
+
+    /// 4 本の u64 レーン (sad_epu8 の出力) の総和。
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn hsum_epi64(v: __m256i) -> u64 {
+        let hi = _mm256_extracti128_si256(v, 1);
+        let lo = _mm256_castsi256_si128(v);
+        let sum2 = _mm_add_epi64(lo, hi);
+        let sum1 = _mm_add_epi64(sum2, _mm_unpackhi_epi64(sum2, sum2));
+        _mm_cvtsi128_si64(sum1) as u64
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn l2_accum(a: &[u8], b: &[u8]) -> u64 {
+        let zero = _mm256_setzero_si256();
+        // アキュムレータ 2 本で依存チェーンを切る
+        let mut acc0 = zero;
+        let mut acc1 = zero;
+        let chunks = a.len() / 32;
+        for i in 0..chunks {
+            let va = _mm256_loadu_si256(a.as_ptr().add(i * 32) as *const __m256i);
+            let vb = _mm256_loadu_si256(b.as_ptr().add(i * 32) as *const __m256i);
+            // |a − b| (飽和減算を両方向に取って OR)
+            let d = _mm256_or_si256(_mm256_subs_epu8(va, vb), _mm256_subs_epu8(vb, va));
+            // 16 ビットへ展開して madd で二乗和 (d² ≤ 65025 なので i32 に収まる)
+            let lo = _mm256_unpacklo_epi8(d, zero);
+            let hi = _mm256_unpackhi_epi8(d, zero);
+            acc0 = _mm256_add_epi32(acc0, _mm256_madd_epi16(lo, lo));
+            acc1 = _mm256_add_epi32(acc1, _mm256_madd_epi16(hi, hi));
+        }
+        let mut sum = hsum_epi32(_mm256_add_epi32(acc0, acc1));
+        for i in chunks * 32..a.len() {
+            let d = a[i] as i32 - b[i] as i32;
+            sum += (d * d) as u64;
+        }
+        sum
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn dot_accum(a: &[u8], b: &[u8]) -> (u64, u64) {
+        let zero = _mm256_setzero_si256();
+        let mut dot0 = zero;
+        let mut dot1 = zero;
+        let mut sum_b = zero;
+        let chunks = a.len() / 32;
+        for i in 0..chunks {
+            let va = _mm256_loadu_si256(a.as_ptr().add(i * 32) as *const __m256i);
+            let vb = _mm256_loadu_si256(b.as_ptr().add(i * 32) as *const __m256i);
+            let alo = _mm256_unpacklo_epi8(va, zero);
+            let ahi = _mm256_unpackhi_epi8(va, zero);
+            let blo = _mm256_unpacklo_epi8(vb, zero);
+            let bhi = _mm256_unpackhi_epi8(vb, zero);
+            dot0 = _mm256_add_epi32(dot0, _mm256_madd_epi16(alo, blo));
+            dot1 = _mm256_add_epi32(dot1, _mm256_madd_epi16(ahi, bhi));
+            // Σb は「ゼロとの絶対差和」= そのまま総和 (8 バイトごとに u64)
+            sum_b = _mm256_add_epi64(sum_b, _mm256_sad_epu8(vb, zero));
+        }
+        let mut dot = hsum_epi32(_mm256_add_epi32(dot0, dot1));
+        let mut sum = hsum_epi64(sum_b);
+        for i in chunks * 32..a.len() {
+            dot += a[i] as u64 * b[i] as u64;
+            sum += b[i] as u64;
+        }
+        (dot, sum)
+    }
+}
+
 #[cfg(target_arch = "aarch64")]
 mod neon {
     use std::arch::aarch64::*;
@@ -262,8 +366,11 @@ mod tests {
             state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
             (state >> 33) as u8
         };
-        // 端数 (len % 16 != 0) を含む長さで検証
-        for len in [1usize, 15, 16, 17, 64, 127, 128, 768, 1537] {
+        // 端数を含むあらゆる長さで検証する。
+        // SIMD は NEON が 32 バイト/反復、AVX2 も 32 バイト/反復なので、
+        // 0〜80 を総当たりすれば「端数のみ」「1 反復 + 端数」を全て踏む
+        let lens: Vec<usize> = (0..80).chain([127, 128, 255, 256, 768, 1537]).collect();
+        for len in lens {
             let a: Vec<u8> = (0..len).map(|_| next()).collect();
             let b: Vec<u8> = (0..len).map(|_| next()).collect();
             assert_eq!(
@@ -284,6 +391,102 @@ mod tests {
         let (dot, sum) = sq8_dot_accum(&a, &a);
         assert_eq!(dot, 768 * 255 * 255);
         assert_eq!(sum, 768 * 255);
+
+        // アキュムレータ境界の近く (doc の上限 dim ≤ 66051) でも一致すること。
+        // AVX2 は 32 ビットレーンに二乗和を積むので、ここが最も溢れやすい
+        for len in [65536usize, 66051] {
+            let a = vec![255u8; len];
+            let b = vec![0u8; len];
+            assert_eq!(
+                sq8_l2_accum(&a, &b),
+                sq8_l2_accum_scalar(&a, &b),
+                "l2 max len={len}"
+            );
+            assert_eq!(
+                sq8_dot_accum(&a, &a),
+                sq8_dot_accum_scalar(&a, &a),
+                "dot max len={len}"
+            );
+        }
+
+        // 差が 128 以上 (符号付き 8 ビットでは負になる領域) でも正しいこと。
+        // AVX2 で maddubs を使うとここが壊れるので、その回帰チェック
+        for (x, y) in [(255u8, 0u8), (0, 255), (200, 10), (10, 200), (128, 127)] {
+            let a = vec![x; 64];
+            let b = vec![y; 64];
+            assert_eq!(
+                sq8_l2_accum(&a, &b),
+                sq8_l2_accum_scalar(&a, &b),
+                "l2 x={x} y={y}"
+            );
+            assert_eq!(
+                sq8_dot_accum(&a, &b),
+                sq8_dot_accum_scalar(&a, &b),
+                "dot x={x} y={y}"
+            );
+        }
+    }
+
+    /// AVX2 実装を**名指しで**叩いて一致を確認する (todos/701)。
+    ///
+    /// `simd_matches_scalar_exactly` はディスパッチ経由なので、CPU が AVX2 に
+    /// 非対応だと「スカラー vs スカラー」になって何も検証しない。
+    /// CI (ubuntu = x86_64) でこの経路が本当に通ったことを保証するために分ける。
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx2_matches_scalar_exactly() {
+        if !std::arch::is_x86_feature_detected!("avx2") {
+            // スキップが黙って通ると「検証したつもり」になる。
+            // GitHub Actions の x86_64 runner は必ず AVX2 を持つので、
+            // CI 上で検出できないならテスト自体が素通りしている証拠として落とす
+            assert!(
+                std::env::var_os("GITHUB_ACTIONS").is_none(),
+                "CI の x86_64 runner で AVX2 が検出されない = この検証が素通りしている"
+            );
+            eprintln!("AVX2 非対応の CPU なのでスキップ (Rosetta 等)");
+            return;
+        }
+        let mut state = 0x1234u64;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (state >> 33) as u8
+        };
+        let lens: Vec<usize> = (0..80).chain([127, 128, 768, 66051]).collect();
+        for len in lens {
+            let a: Vec<u8> = (0..len).map(|_| next()).collect();
+            let b: Vec<u8> = (0..len).map(|_| next()).collect();
+            // Safety: 直前に AVX2 の有無を確認している
+            unsafe {
+                assert_eq!(
+                    avx2::l2_accum(&a, &b),
+                    sq8_l2_accum_scalar(&a, &b),
+                    "avx2 l2 len={len}"
+                );
+                assert_eq!(
+                    avx2::dot_accum(&a, &b),
+                    sq8_dot_accum_scalar(&a, &b),
+                    "avx2 dot len={len}"
+                );
+            }
+        }
+        // 差が 128 以上 (符号付き 8 ビットで負になる領域) と最大値
+        for (x, y) in [(255u8, 0u8), (0, 255), (200, 10), (128, 127)] {
+            let a = vec![x; 96];
+            let b = vec![y; 96];
+            // Safety: 直前に AVX2 の有無を確認している
+            unsafe {
+                assert_eq!(
+                    avx2::l2_accum(&a, &b),
+                    sq8_l2_accum_scalar(&a, &b),
+                    "x={x} y={y}"
+                );
+                assert_eq!(
+                    avx2::dot_accum(&a, &b),
+                    sq8_dot_accum_scalar(&a, &b),
+                    "x={x} y={y}"
+                );
+            }
+        }
     }
 
     #[test]
