@@ -9,7 +9,8 @@
 //! | POST | /collections/{name}/records | upsert (単発 or 配列) |
 //! | GET | /collections/{name}/records/{id} | 点参照 |
 //! | DELETE | /collections/{name}/records/{id} | レコード削除 |
-//! | POST | /collections/{name}/search | 検索 (vector, k, ef, nprobe, filter) |
+//! | POST | /collections/{name}/search | 検索 (vector, k, ef, nprobe, threshold, filter) |
+//! | POST | /collections/{name}/search/batch | バッチ検索 (vectors: [[..], ..]) |
 //! | POST | /admin/flush | フラッシュ |
 //! | POST | /admin/compact | コンパクション |
 //! | GET | /health | 死活確認 (**認証不要**。orchestrator の probe 用) |
@@ -68,6 +69,7 @@ pub fn router_with_auth(db: Arc<Database>, api_key: Option<String>) -> Router {
             get(get_record).delete(delete_record),
         )
         .route("/collections/{name}/search", post(search))
+        .route("/collections/{name}/search/batch", post(search_batch))
         .route("/admin/flush", post(flush))
         .route("/admin/compact", post(compact))
         .route("/replication/state", get(replication_state))
@@ -467,6 +469,8 @@ struct SearchBody {
     ef: Option<usize>,
     /// IVF / IVF-PQ で走査するクラスタ数 (省略時は StoreOptions の既定)
     nprobe: Option<usize>,
+    /// スコア閾値 (L2 は距離がこれ以下、Cosine/Dot はスコアがこれ以上)
+    threshold: Option<f32>,
     filter: Option<Value>,
 }
 
@@ -490,6 +494,9 @@ async fn search(
         if let Some(nprobe) = body.nprobe {
             builder = builder.nprobe(nprobe);
         }
+        if let Some(t) = body.threshold {
+            builder = builder.threshold(t);
+        }
         if let Some(f) = filter {
             builder = builder.filter(f);
         }
@@ -506,6 +513,65 @@ async fn search(
             })
             .collect();
         Ok(Json(json!({ "hits": hits })))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct BatchSearchBody {
+    /// クエリベクトルの配列
+    vectors: Vec<Vec<f32>>,
+    #[serde(default = "default_k")]
+    k: usize,
+    ef: Option<usize>,
+    nprobe: Option<usize>,
+    threshold: Option<f32>,
+    filter: Option<Value>,
+}
+
+/// バッチ検索 (todo 1501)。往復を 1 回にまとめ、サーバ側でクエリ間を並列化する。
+/// 結果は入力と同じ順の配列。
+async fn search_batch(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<BatchSearchBody>,
+) -> Result<Json<Value>, ApiError> {
+    let filter = body.filter.as_ref().map(parse_filter).transpose()?;
+    let db = Arc::clone(&state.db);
+    blocking(move || {
+        let col = db.collection(&name)?;
+        let mut builder = col.search_batch(&body.vectors).k(body.k);
+        if let Some(ef) = body.ef {
+            builder = builder.ef(ef);
+        }
+        if let Some(nprobe) = body.nprobe {
+            builder = builder.nprobe(nprobe);
+        }
+        if let Some(t) = body.threshold {
+            builder = builder.threshold(t);
+        }
+        if let Some(f) = filter {
+            builder = builder.filter(f);
+        }
+        let results: Vec<Value> = builder
+            .run()?
+            .iter()
+            .map(|hits| {
+                let hits: Vec<Value> = hits
+                    .iter()
+                    .map(|h| {
+                        json!({
+                            "id": h.id,
+                            "ext_id": h.ext_id(),
+                            "score": h.score,
+                            "meta": meta_to_json(&h.metadata),
+                        })
+                    })
+                    .collect();
+                json!({ "hits": hits })
+            })
+            .collect();
+        Ok(Json(json!({ "results": results })))
     })
     .await
 }

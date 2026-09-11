@@ -82,3 +82,41 @@ def test_persistence(tmp_path):
     db = hamane.Database(path)
     col = db.collection("docs")
     assert col.get("persist-me")["vector"] == [1.0, 2.0]
+
+
+def test_batch_search_and_threshold(tmp_path):
+    """バッチ検索 (todo 1501) と閾値 (todo 1502)。"""
+    db = hamane.Database(str(tmp_path / "db"))
+    col = db.create_collection("vecs", dim=4, metric="l2")
+
+    rng = np.random.default_rng(1501)
+    matrix = rng.random((200, 4), dtype=np.float32)
+    col.upsert_batch(list(range(200)), matrix)
+    db.flush()
+
+    # numpy 行列をそのまま渡せる。結果は入力と同じ順
+    queries = matrix[[3, 50, 199]]
+    results = col.search_batch(queries, k=2)
+    assert len(results) == 3
+    assert [r[0]["id"] for r in results] == [3, 50, 199]
+
+    # 1 件ずつ検索した結果と完全一致
+    for q, got in zip(queries, results):
+        one = col.search(q, k=2)
+        assert [h["id"] for h in got] == [h["id"] for h in one]
+        assert got[0]["score"] == pytest.approx(one[0]["score"])
+
+    # リストのリストでも渡せる
+    as_list = col.search_batch([list(map(float, queries[0]))], k=1)
+    assert as_list[0][0]["id"] == 3
+
+    # 閾値: l2 は距離がこれ以下だけ (自分自身は距離 0 なので必ず残る)
+    hits = col.search(matrix[7], k=10, threshold=0.0)
+    assert [h["id"] for h in hits] == [7]
+
+    # 誰も満たさない閾値なら空 (エラーにはならない)
+    assert col.search(matrix[7], k=10, threshold=-1.0) == []
+    assert col.search_batch(queries, k=5, threshold=-1.0) == [[], [], []]
+
+    # 空のクエリ列
+    assert col.search_batch([], k=5) == []
