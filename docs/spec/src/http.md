@@ -36,6 +36,7 @@ TLS はスコープ外です (リバースプロキシの前提)。
 | GET | `/collections/{name}/records/{id}` | 点参照 |
 | DELETE | `/collections/{name}/records/{id}` | 削除 |
 | POST | `/collections/{name}/search` | 近傍検索 |
+| POST | `/collections/{name}/search/batch` | バッチ検索 (複数クエリを 1 回で) |
 | POST | `/admin/flush` | フラッシュ |
 | POST | `/admin/compact` | コンパクション |
 | GET | `/replication/*` | レプリカ同期用 ([レプリケーション](replication.md)) |
@@ -131,12 +132,30 @@ curl -s -X POST -H "$AUTH" -H "$JSON" \
 | `k` | 10 | 取得件数 |
 | `ef` | サーバ設定 | HNSW の探索幅。大きいほど高精度・低速 |
 | `nprobe` | サーバ設定 | IVF / IVF-PQ で走査するクラスタ数 |
+| `threshold` | なし | スコア閾値 (L2 は距離がこれ以下、Cosine/Dot はスコアがこれ以上) |
 | `filter` | なし | メタデータ条件 (下記) |
 
 `score` は metric に応じた値です (L2 は距離、Cosine は類似度、Dot は内積)。
 量子化を有効にしていても **score は常に正確な f32 距離**です
 ([検索](search.md#量子化による高速化))。文字列 ID のレコードは `ext_id` に
 元の文字列が入ります。
+
+### バッチ検索
+
+クエリが多いときは 1 回にまとめると往復が減り、サーバ側でクエリ間が並列化されます。
+`results` は**入力と同じ順**です。
+
+```bash
+curl -s -X POST -H "$AUTH" -H "$JSON" -d '{
+  "vectors": [[1,0,0,0], [0,1,0,0], [0,0,1,0]],
+  "k": 3
+}' http://127.0.0.1:8080/collections/docs/search/batch
+# {"results":[{"hits":[...]},{"hits":[...]},{"hits":[...]}]}
+```
+
+`k` / `ef` / `nprobe` / `threshold` / `filter` は単発検索と同じ意味で、
+全クエリに共通して適用されます。次元の違うベクトルが 1 本でも混ざっていると
+バッチ全体が 400 になります。
 
 ### フィルタ
 

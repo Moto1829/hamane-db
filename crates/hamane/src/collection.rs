@@ -201,6 +201,39 @@ impl Collection {
             filter: None,
             ef: None,
             nprobe: None,
+            threshold: None,
+        }
+    }
+
+    /// 複数クエリをまとめて検索する (todo 1501)。
+    ///
+    /// 結果は入力と同じ順です。`LiveView` の取得は 1 回で済み、クエリ間は
+    /// 検索スレッドプールで並列に処理されるため、1 件ずつ `search` を呼ぶより
+    /// 速くなります (特にセグメントが 1 個で、セグメント間並列が効かないとき)。
+    ///
+    /// ```
+    /// # use hamane::{CollectionConfig, Database, Metric};
+    /// # fn main() -> hamane::Result<()> {
+    /// # let db = Database::in_memory();
+    /// # let col = db.create_collection("docs", CollectionConfig { dim: 2, metric: Metric::L2 })?;
+    /// let queries = vec![vec![1.0f32, 0.0], vec![0.0, 1.0]];
+    /// let results = col.search_batch(&queries).k(5).run()?;
+    /// assert_eq!(results.len(), 2); // 入力と同じ数・同じ順
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn search_batch<'a, Q: AsRef<[f32]>>(
+        &'a self,
+        queries: &'a [Q],
+    ) -> BatchSearchBuilder<'a, Q> {
+        BatchSearchBuilder {
+            collection: self,
+            queries,
+            k: 10,
+            filter: None,
+            ef: None,
+            nprobe: None,
+            threshold: None,
         }
     }
 
@@ -236,38 +269,107 @@ impl Collection {
         filter: Option<&Filter>,
         ef: Option<usize>,
         nprobe: Option<usize>,
+        threshold: Option<f32>,
     ) -> Result<Vec<SearchHit>> {
-        let metric = self.config.metric;
-        let query = self.prepare_vector(query.to_vec())?;
-        let view: LiveView = self.store.view(self.collection_id)?;
-        let ef = ef.unwrap_or(self.store.options().hnsw.ef_search);
-        let nprobe = nprobe.unwrap_or(self.store.options().nprobe);
+        let view = Arc::new(self.store.view(self.collection_id)?);
+        let search = self.plan(view, query, k, filter, ef, nprobe)?;
+        self.execute_parallel_over_segments(&Arc::new(search), threshold)
+    }
 
-        // (比較キー, id) を全ソースから収集。
-        // rank: 0..memtables().len() が memtable 列 (active + フラッシュ待ち)、
-        // それ以降が新しい順のセグメント
-        let mut candidates: Vec<(f32, Id)> = Vec::new();
+    /// バッチ検索 (todo 1501)。`LiveView` を 1 回だけ取り、
+    /// **クエリ間**をプールで並列に処理する。
+    ///
+    /// 各クエリの中ではセグメントを逐次に見る。クエリ並列とセグメント並列を
+    /// 二重にかけるとスレッドを奪い合うだけなので、粒度の粗いクエリ側を採る。
+    fn run_search_batch<Q: AsRef<[f32]>>(
+        &self,
+        queries: &[Q],
+        k: usize,
+        filter: Option<&Filter>,
+        ef: Option<usize>,
+        nprobe: Option<usize>,
+        threshold: Option<f32>,
+    ) -> Result<Vec<Vec<SearchHit>>> {
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+        // view は 1 回だけ (ロック取得と LiveView 構築をクエリ数ぶん繰り返さない)
+        let view = Arc::new(self.store.view(self.collection_id)?);
+        // 計画づくり (次元検証・正規化) は先に全件やる。
+        // 1 本でも不正ならバッチ全体をエラーにする
+        let plans: Vec<Arc<SegmentSearch>> = queries
+            .iter()
+            .map(|q| {
+                self.plan(Arc::clone(&view), q.as_ref(), k, filter, ef, nprobe)
+                    .map(Arc::new)
+            })
+            .collect::<Result<_>>()?;
 
-        for (rank, mt) in view.memtables().iter().enumerate() {
-            for h in search_flat(mt.iter(), &query, k, metric, filter) {
-                // rank 0 (active) は常に最新。フラッシュ待ちは active に shadow され得る
-                if rank == 0 || view.is_live(h.id, rank) {
-                    candidates.push((metric.key_from_score(h.score), h.id));
-                }
+        // クエリ 1 本、または並列度 1 なら逐次
+        if plans.len() == 1 || self.search_pool.threads() <= 1 {
+            return plans
+                .iter()
+                .map(|plan| Ok(plan.finalize(plan.run_sequential()?, threshold)))
+                .collect();
+        }
+
+        // クエリ単位でジョブを積む。呼び出しスレッドは先頭を担当する
+        let (tx, rx) = std::sync::mpsc::channel();
+        for (i, plan) in plans.iter().enumerate().skip(1) {
+            let (plan, tx) = (Arc::clone(plan), tx.clone());
+            self.search_pool.execute(Box::new(move || {
+                // panic は payload ごと呼び出し元へ運び、そちらで再伝播する
+                let result = catch_unwind(AssertUnwindSafe(|| plan.run_sequential()));
+                let _ = tx.send((i, result));
+            }));
+        }
+        let mut collected: Vec<Option<Vec<(f32, Id)>>> = (0..plans.len()).map(|_| None).collect();
+        collected[0] = Some(plans[0].run_sequential()?);
+        for _ in 1..plans.len() {
+            let (i, result) = rx.recv().expect("search job dropped without sending");
+            match result {
+                Ok(candidates) => collected[i] = Some(candidates?),
+                Err(payload) => std::panic::resume_unwind(payload),
             }
         }
 
-        // セグメント検索の共有コンテキスト。プールのジョブは 'static が必要な
-        // ため owned に集約し Arc で配る (todo 801)
-        let search = Arc::new(SegmentSearch {
+        Ok(plans
+            .iter()
+            .zip(collected)
+            .map(|(plan, candidates)| {
+                plan.finalize(candidates.expect("every query is collected"), threshold)
+            })
+            .collect())
+    }
+
+    /// 1 クエリ分の検索計画を組む (検証・正規化と既定値の解決)。
+    fn plan(
+        &self,
+        view: Arc<LiveView>,
+        query: &[f32],
+        k: usize,
+        filter: Option<&Filter>,
+        ef: Option<usize>,
+        nprobe: Option<usize>,
+    ) -> Result<SegmentSearch> {
+        Ok(SegmentSearch {
             view,
-            query,
+            query: self.prepare_vector(query.to_vec())?,
             k,
-            ef,
-            nprobe,
-            metric,
+            ef: ef.unwrap_or(self.store.options().hnsw.ef_search),
+            nprobe: nprobe.unwrap_or(self.store.options().nprobe),
+            metric: self.config.metric,
             filter: filter.cloned(),
-        });
+        })
+    }
+
+    /// 1 クエリを、セグメント間をプールで並列に検索する (単発検索の経路)。
+    fn execute_parallel_over_segments(
+        &self,
+        search: &Arc<SegmentSearch>,
+        threshold: Option<f32>,
+    ) -> Result<Vec<SearchHit>> {
+        let mut candidates = search.memtable_candidates();
         let n = search.view.segments.len();
 
         // セグメント間は共有プールで並列に検索する (todo 503 / 801)。
@@ -279,7 +381,7 @@ impl Collection {
         } else {
             let (tx, rx) = std::sync::mpsc::channel();
             for i in 1..n {
-                let (search, tx) = (Arc::clone(&search), tx.clone());
+                let (search, tx) = (Arc::clone(search), tx.clone());
                 self.search_pool.execute(Box::new(move || {
                     // panic は payload ごと呼び出し元へ運び、そちらで再伝播する
                     let result = catch_unwind(AssertUnwindSafe(|| search.segment(i)));
@@ -299,25 +401,15 @@ impl Collection {
             }
         }
 
-        // live 判定済みなので id 重複はない。キー昇順 (近い順) に k 件
-        candidates.sort_by(|a, b| a.partial_cmp(b).expect("keys are finite"));
-        candidates.truncate(k);
-
-        Ok(candidates
-            .into_iter()
-            .map(|(key, id)| SearchHit {
-                id,
-                score: metric.score_from_key(key),
-                metadata: search.view.get(id).map(|r| r.metadata).unwrap_or_default(),
-            })
-            .collect())
+        Ok(search.finalize(candidates, threshold))
     }
 }
 
 /// 1 回の検索でセグメント群に適用する共有コンテキスト (todo 801)。
 /// 呼び出しスレッドとプールのジョブが Arc で共有する。
 struct SegmentSearch {
-    view: LiveView,
+    /// バッチ検索ではクエリ間で共有する (ロック取得と LiveView 構築を 1 回に)
+    view: Arc<LiveView>,
     query: Vec<f32>,
     k: usize,
     ef: usize,
@@ -328,6 +420,68 @@ struct SegmentSearch {
 }
 
 impl SegmentSearch {
+    /// memtable 列 (active + フラッシュ待ち) からの候補。
+    ///
+    /// rank: 0..memtables().len() が memtable 列、それ以降が新しい順のセグメント。
+    fn memtable_candidates(&self) -> Vec<(f32, Id)> {
+        let mut candidates = Vec::new();
+        for (rank, mt) in self.view.memtables().iter().enumerate() {
+            for h in search_flat(
+                mt.iter(),
+                &self.query,
+                self.k,
+                self.metric,
+                self.filter.as_ref(),
+            ) {
+                // rank 0 (active) は常に最新。フラッシュ待ちは active に shadow され得る
+                if rank == 0 || self.view.is_live(h.id, rank) {
+                    candidates.push((self.metric.key_from_score(h.score), h.id));
+                }
+            }
+        }
+        candidates
+    }
+
+    /// memtable + 全セグメントを**逐次**に検索する (バッチ検索の 1 ジョブ)。
+    /// バッチではクエリ間で並列化するので、ここで更に並列化はしない。
+    fn run_sequential(&self) -> Result<Vec<(f32, Id)>> {
+        let mut candidates = self.memtable_candidates();
+        for i in 0..self.view.segments.len() {
+            candidates.extend(self.segment(i)?);
+        }
+        Ok(candidates)
+    }
+
+    /// 候補をスコア順に整えて上位 k 件の `SearchHit` にする。
+    ///
+    /// `threshold` は metric に応じた自然な向き (L2 は「距離 ≤ 閾値」、
+    /// Cosine/Dot は「スコア ≥ 閾値」) で、内部キーに直すと**どちらも
+    /// `key <= key_from_score(threshold)`** になる (todo 1502)。
+    fn finalize(&self, mut candidates: Vec<(f32, Id)>, threshold: Option<f32>) -> Vec<SearchHit> {
+        if let Some(t) = threshold {
+            if matches!(self.metric, Metric::L2) && t < 0.0 {
+                // L2 の内部キーは距離の**二乗**なので、負の閾値を二乗すると
+                // 符号が消えて「距離 ≤ |t|」になってしまう。距離は 0 以上なので
+                // 負の閾値を満たすものは存在しない、が正しい
+                candidates.clear();
+            } else {
+                let bound = self.metric.key_from_score(t);
+                candidates.retain(|(key, _)| *key <= bound);
+            }
+        }
+        // live 判定済みなので id 重複はない。キー昇順 (近い順) に k 件
+        candidates.sort_by(|a, b| a.partial_cmp(b).expect("keys are finite"));
+        candidates.truncate(self.k);
+        candidates
+            .into_iter()
+            .map(|(key, id)| SearchHit {
+                id,
+                score: self.metric.score_from_key(key),
+                metadata: self.view.get(id).map(|r| r.metadata).unwrap_or_default(),
+            })
+            .collect()
+    }
+
     /// セグメント 1 個 (view.segments[index]) の検索プラン
     /// (docs/design/index.md §4–5)。
     fn segment(&self, index: usize) -> Result<Vec<(f32, Id)>> {
@@ -552,6 +706,7 @@ pub struct SearchBuilder<'a> {
     filter: Option<Filter>,
     ef: Option<usize>,
     nprobe: Option<usize>,
+    threshold: Option<f32>,
 }
 
 impl<'a> SearchBuilder<'a> {
@@ -581,6 +736,21 @@ impl<'a> SearchBuilder<'a> {
         self
     }
 
+    /// スコアの閾値 (todo 1502)。**metric に応じた自然な向き**で解釈する:
+    ///
+    /// - `Metric::L2`: 距離が `threshold` **以下**のものだけ
+    /// - `Metric::Cosine` / `Metric::Dot`: スコアが `threshold` **以上**のものだけ
+    ///
+    /// 閾値で絞った上で上位 `k` 件を返す。満たすものが `k` 件に満たなければ
+    /// その数だけ (0 件もあり得る) 返る。量子化を有効にしていても判定は
+    /// f32 再ランク後の正確なスコアで行われる。
+    ///
+    /// `Metric::L2` に負の閾値を渡すと、距離は常に 0 以上なので必ず 0 件になる。
+    pub fn threshold(mut self, threshold: f32) -> Self {
+        self.threshold = Some(threshold);
+        self
+    }
+
     /// 検索を実行し、近い順に返す。
     pub fn run(self) -> Result<Vec<SearchHit>> {
         self.collection.run_search(
@@ -589,6 +759,66 @@ impl<'a> SearchBuilder<'a> {
             self.filter.as_ref(),
             self.ef,
             self.nprobe,
+            self.threshold,
+        )
+    }
+}
+
+/// 複数クエリをまとめて検索するビルダー (todo 1501)。
+///
+/// `Collection::search_batch` から作る。設定は全クエリに共通で適用される。
+pub struct BatchSearchBuilder<'a, Q: AsRef<[f32]>> {
+    collection: &'a Collection,
+    queries: &'a [Q],
+    k: usize,
+    filter: Option<Filter>,
+    ef: Option<usize>,
+    nprobe: Option<usize>,
+    threshold: Option<f32>,
+}
+
+impl<Q: AsRef<[f32]>> BatchSearchBuilder<'_, Q> {
+    /// 各クエリで取得する件数 (既定 10)。
+    pub fn k(mut self, k: usize) -> Self {
+        self.k = k;
+        self
+    }
+
+    /// メタデータフィルタ (全クエリ共通)。
+    pub fn filter(mut self, filter: Filter) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    /// HNSW の探索幅 ef_search を上書きする。
+    pub fn ef(mut self, ef: usize) -> Self {
+        self.ef = Some(ef);
+        self
+    }
+
+    /// IVF の走査クラスタ数 nprobe を上書きする。
+    pub fn nprobe(mut self, nprobe: usize) -> Self {
+        self.nprobe = Some(nprobe);
+        self
+    }
+
+    /// スコアの閾値 (`SearchBuilder::threshold` と同じ意味)。
+    pub fn threshold(mut self, threshold: f32) -> Self {
+        self.threshold = Some(threshold);
+        self
+    }
+
+    /// 検索を実行する。結果は**入力と同じ順**で返る。
+    ///
+    /// 1 件ずつ `search` を呼んだ結果と完全に一致する (並列化は結果に影響しない)。
+    pub fn run(self) -> Result<Vec<Vec<SearchHit>>> {
+        self.collection.run_search_batch(
+            self.queries,
+            self.k,
+            self.filter.as_ref(),
+            self.ef,
+            self.nprobe,
+            self.threshold,
         )
     }
 }

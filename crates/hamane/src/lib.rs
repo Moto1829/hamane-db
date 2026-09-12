@@ -29,7 +29,7 @@ mod collection;
 mod database;
 mod pool;
 
-pub use collection::{Collection, CollectionConfig, SearchBuilder, SearchHit};
+pub use collection::{BatchSearchBuilder, Collection, CollectionConfig, SearchBuilder, SearchHit};
 pub use database::Database;
 pub use hamane_core::opq::OpqRotation;
 pub use hamane_core::{

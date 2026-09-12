@@ -326,3 +326,94 @@ async fn search_accepts_ef_and_nprobe() {
         assert_eq!(value["hits"][0]["id"].as_u64(), Some(10), "body = {body}");
     }
 }
+
+/// バッチ検索 (todo 1501) と閾値 (todo 1502) の HTTP 露出。
+#[tokio::test]
+async fn batch_search_and_threshold() {
+    let app = test_app();
+    request(
+        &app,
+        "PUT",
+        "/collections/docs",
+        Some(json!({"dim": 2, "metric": "l2"})),
+    )
+    .await;
+    let records: Vec<Value> = (0..20u64)
+        .map(|i| json!({"id": i, "vector": [i as f32, 0.0]}))
+        .collect();
+    request(
+        &app,
+        "POST",
+        "/collections/docs/records",
+        Some(Value::Array(records)),
+    )
+    .await;
+
+    // バッチ: 入力と同じ順で results が返る
+    let (status, value) = request(
+        &app,
+        "POST",
+        "/collections/docs/search/batch",
+        Some(json!({"vectors": [[3.0, 0.0], [10.0, 0.0], [19.0, 0.0]], "k": 1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let results = value["results"].as_array().expect("results");
+    assert_eq!(results.len(), 3);
+    for (i, want) in [3u64, 10, 19].iter().enumerate() {
+        assert_eq!(results[i]["hits"][0]["id"].as_u64(), Some(*want));
+    }
+
+    // 単発検索と完全に一致する
+    let (_, single) = request(
+        &app,
+        "POST",
+        "/collections/docs/search",
+        Some(json!({"vector": [10.0, 0.0], "k": 3})),
+    )
+    .await;
+    let (_, batched) = request(
+        &app,
+        "POST",
+        "/collections/docs/search/batch",
+        Some(json!({"vectors": [[10.0, 0.0]], "k": 3})),
+    )
+    .await;
+    assert_eq!(single["hits"], batched["results"][0]["hits"]);
+
+    // 閾値: L2 は距離がこれ以下だけ
+    let (status, value) = request(
+        &app,
+        "POST",
+        "/collections/docs/search",
+        Some(json!({"vector": [10.0, 0.0], "k": 10, "threshold": 2.0})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let hits = value["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 5, "8,9,10,11,12 の 5 件のはず: {value}");
+    for hit in hits {
+        assert!(hit["score"].as_f64().unwrap() <= 2.0 + 1e-6);
+    }
+
+    // 空のクエリ列は空の results
+    let (status, value) = request(
+        &app,
+        "POST",
+        "/collections/docs/search/batch",
+        Some(json!({"vectors": []})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(value["results"].as_array().unwrap().len(), 0);
+
+    // 次元不一致は 400
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/collections/docs/search/batch",
+        Some(json!({"vectors": [[1.0, 0.0], [1.0]]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

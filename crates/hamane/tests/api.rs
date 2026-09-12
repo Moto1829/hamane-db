@@ -1,6 +1,6 @@
 //! 公開 API 経由の統合テスト (M1 完了条件: upsert / delete / search が動く)。
 
-use hamane::{CollectionConfig, Database, Filter, HamaneError, Metric, Record};
+use hamane::{CollectionConfig, Database, Filter, HamaneError, MetaValue, Metric, Record};
 
 fn db_with_docs(metric: Metric) -> Database {
     let db = Database::in_memory();
@@ -144,4 +144,132 @@ fn l2_scores_are_distances() {
     let ids: Vec<_> = hits.iter().map(|h| h.id).collect();
     assert_eq!(ids, vec![0, 1, 2, 3, 4]);
     assert!((hits[3].score - 3.0).abs() < 1e-5);
+}
+
+/// スコア閾値 (todo 1502)。metric ごとに自然な向きで効くこと。
+#[test]
+fn threshold_filters_by_score() {
+    // L2: 距離が閾値以下のものだけ
+    let db = db_with_docs(Metric::L2);
+    let col = db.collection("docs").unwrap();
+    let all = col.search(&[0.0, 0.0, 0.0]).k(10).run().unwrap();
+    assert!(all.len() > 1, "前提: 複数件ある");
+
+    // 2 番目のスコアを閾値にすると 2 件以上になる (同点があり得るので >=)
+    let bound = all[1].score;
+    let hits = col
+        .search(&[0.0, 0.0, 0.0])
+        .k(10)
+        .threshold(bound)
+        .run()
+        .unwrap();
+    assert!(hits.len() >= 2, "閾値 {bound} で {} 件", hits.len());
+    for hit in &hits {
+        assert!(
+            hit.score <= bound + 1e-6,
+            "L2 は距離が閾値以下: {}",
+            hit.score
+        );
+    }
+
+    // 閾値なしの結果から「閾値を満たすもの」を抜いた集合と一致する
+    let expected: Vec<u64> = all
+        .iter()
+        .filter(|h| h.score <= bound + 1e-6)
+        .map(|h| h.id)
+        .collect();
+    let got: Vec<u64> = hits.iter().map(|h| h.id).collect();
+    assert_eq!(got, expected);
+
+    // 誰も満たさない閾値では 0 件 (エラーにはならない)
+    assert!(col
+        .search(&[0.0, 0.0, 0.0])
+        .k(10)
+        .threshold(-1.0)
+        .run()
+        .unwrap()
+        .is_empty());
+}
+
+/// Cosine / Dot は「スコアが閾値以上」。向きが逆になること。
+#[test]
+fn threshold_direction_follows_metric() {
+    for metric in [Metric::Cosine, Metric::Dot] {
+        let db = db_with_docs(metric);
+        let col = db.collection("docs").unwrap();
+        let all = col.search(&[1.0, 0.0, 0.0]).k(10).run().unwrap();
+        assert!(all.len() > 1);
+
+        let bound = all[1].score;
+        let hits = col
+            .search(&[1.0, 0.0, 0.0])
+            .k(10)
+            .threshold(bound)
+            .run()
+            .unwrap();
+        assert!(!hits.is_empty(), "{metric:?}");
+        for hit in &hits {
+            assert!(
+                hit.score >= bound - 1e-6,
+                "{metric:?} はスコアが閾値以上: {}",
+                hit.score
+            );
+        }
+        // 上限より大きい閾値では 0 件
+        let too_high = all[0].score + 1.0;
+        assert!(col
+            .search(&[1.0, 0.0, 0.0])
+            .k(10)
+            .threshold(too_high)
+            .run()
+            .unwrap()
+            .is_empty());
+    }
+}
+
+/// バッチ検索 (todo 1501) は 1 件ずつ検索した結果と完全一致する。
+#[test]
+fn batch_search_matches_individual_searches() {
+    let db = db_with_docs(Metric::L2);
+    let col = db.collection("docs").unwrap();
+    let queries = vec![
+        vec![1.0, 0.0, 0.0],
+        vec![0.0, 1.0, 0.0],
+        vec![0.0, 0.0, 1.0],
+        vec![0.5, 0.5, 0.0],
+    ];
+
+    let batch = col.search_batch(&queries).k(3).run().unwrap();
+    assert_eq!(batch.len(), queries.len(), "入力と同じ数・同じ順");
+    for (q, got) in queries.iter().zip(&batch) {
+        let one = col.search(q).k(3).run().unwrap();
+        let ids: Vec<u64> = got.iter().map(|h| h.id).collect();
+        let want: Vec<u64> = one.iter().map(|h| h.id).collect();
+        assert_eq!(ids, want, "query {q:?}");
+        for (a, b) in got.iter().zip(&one) {
+            assert!((a.score - b.score).abs() < 1e-6);
+            assert_eq!(a.metadata, b.metadata);
+        }
+    }
+
+    // 空のクエリ列は空を返す
+    let empty: Vec<Vec<f32>> = Vec::new();
+    assert!(col.search_batch(&empty).run().unwrap().is_empty());
+
+    // フィルタと閾値もバッチで効く
+    let filtered = col
+        .search_batch(&queries)
+        .k(10)
+        .filter(Filter::eq("lang", "ja"))
+        .run()
+        .unwrap();
+    for hits in &filtered {
+        for hit in hits {
+            assert_eq!(hit.metadata.get("lang"), Some(&MetaValue::Str("ja".into())));
+        }
+    }
+
+    // 次元が違うクエリが 1 本でもあればバッチ全体がエラー
+    let bad = vec![vec![1.0, 0.0, 0.0], vec![1.0, 0.0]];
+    assert!(col.search_batch(&bad).run().is_err());
 }

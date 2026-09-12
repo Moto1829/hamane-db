@@ -67,6 +67,9 @@ enum Command {
         /// IVF / IVF-PQ で走査するクラスタ数 (省略時は既定値)
         #[arg(long)]
         nprobe: Option<usize>,
+        /// スコア閾値 (L2 は距離がこれ以下、cosine/dot はスコアがこれ以上)
+        #[arg(long)]
+        threshold: Option<f32>,
         /// フィルタ (JSON。例: {"eq":["lang","ja"]}, {"and":[...]})
         #[arg(long)]
         filter: Option<String>,
@@ -139,6 +142,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             k,
             ef,
             nprobe,
+            threshold,
             filter,
             pretty,
         } => {
@@ -151,6 +155,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
             if let Some(nprobe) = nprobe {
                 builder = builder.nprobe(nprobe);
+            }
+            if let Some(t) = threshold {
+                builder = builder.threshold(t);
             }
             if let Some(f) = &filter {
                 builder = builder.filter(parse_filter(&serde_json::from_str(f)?)?);

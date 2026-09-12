@@ -34,7 +34,8 @@ stdin から 1 行 1 レコードの JSON を読みます (1000 件ごとにバ�
 ```sh
 hamane search <DB_DIR> <COLLECTION> \
     --vector '[0.1,0.2,0.3]' \
-    [--k 10] [--ef 64] [--nprobe 8] [--filter '<FILTER_JSON>'] [--pretty]
+    [--k 10] [--ef 64] [--nprobe 8] [--threshold 0.2] \
+    [--filter '<FILTER_JSON>'] [--pretty]
 ```
 
 | オプション | 既定 | 意味 |
@@ -42,6 +43,7 @@ hamane search <DB_DIR> <COLLECTION> \
 | `--k` | 10 | 取得件数 |
 | `--ef` | DB 設定 | HNSW の探索幅。大きいほど高精度・低速 |
 | `--nprobe` | DB 設定 | IVF / IVF-PQ で走査するクラスタ数 |
+| `--threshold` | なし | スコア閾値 (l2 は距離がこれ以下、cosine/dot はスコアがこれ以上) |
 | `--filter` | なし | メタデータ条件 (下記の JSON 表現) |
 | `--pretty` | off | 人間向けに整形して出力 |
 

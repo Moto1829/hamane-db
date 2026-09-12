@@ -157,6 +157,39 @@ fn extract_vector(v: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
         .map_err(|_| PyValueError::new_err("vector must be a list of floats or a 1-d numpy array"))
 }
 
+/// SearchHit 列を Python の dict リストにする。
+fn hits_to_py(py: Python<'_>, hits: &[engine::SearchHit]) -> PyResult<Vec<Py<PyDict>>> {
+    hits.iter()
+        .map(|h| {
+            let d = PyDict::new(py);
+            d.set_item("id", h.id)?;
+            d.set_item("ext_id", h.ext_id())?;
+            d.set_item("score", h.score)?;
+            d.set_item("meta", meta_to_pydict(py, &h.metadata)?)?;
+            Ok(d.unbind())
+        })
+        .collect()
+}
+
+/// (n, dim) の行列を取り出す。numpy (f32/f64) はゼロコピーで読み、
+/// リストのリストも受ける。
+fn extract_matrix(vectors: &Bound<'_, PyAny>) -> PyResult<Vec<Vec<f32>>> {
+    if let Ok(arr) = vectors.extract::<PyReadonlyArray2<f32>>() {
+        let view = arr.as_array();
+        return Ok(view.outer_iter().map(|row| row.to_vec()).collect());
+    }
+    if let Ok(arr) = vectors.extract::<PyReadonlyArray2<f64>>() {
+        let view = arr.as_array();
+        return Ok(view
+            .outer_iter()
+            .map(|row| row.iter().map(|&x| x as f32).collect())
+            .collect());
+    }
+    vectors
+        .extract::<Vec<Vec<f32>>>()
+        .map_err(|_| PyValueError::new_err("vectors must be a 2-d numpy array or list of lists"))
+}
+
 /// 埋め込み型ベクトルデータベース。
 #[pyclass]
 struct Database {
@@ -270,20 +303,7 @@ impl Collection {
             .map(|item| extract_record_id(&item))
             .collect::<PyResult<_>>()?;
 
-        // numpy (n, dim) はゼロコピーで読み、行ごとに Vec 化する
-        let rows: Vec<Vec<f32>> = if let Ok(arr) = vectors.extract::<PyReadonlyArray2<f32>>() {
-            let view = arr.as_array();
-            view.outer_iter().map(|row| row.to_vec()).collect()
-        } else if let Ok(arr) = vectors.extract::<PyReadonlyArray2<f64>>() {
-            let view = arr.as_array();
-            view.outer_iter()
-                .map(|row| row.iter().map(|&x| x as f32).collect())
-                .collect()
-        } else {
-            vectors.extract::<Vec<Vec<f32>>>().map_err(|_| {
-                PyValueError::new_err("vectors must be a 2-d numpy array or list of lists")
-            })?
-        };
+        let rows = extract_matrix(vectors)?;
 
         if rids.len() != rows.len() {
             return Err(PyValueError::new_err(format!(
@@ -326,13 +346,18 @@ impl Collection {
     }
 
     /// 近傍検索。結果は [{"id", "ext_id", "score", "meta"}] のリスト。
-    #[pyo3(signature = (vector, k=10, ef=None, filter=None))]
+    ///
+    /// `threshold` は metric に応じた向き (l2 は距離がこれ以下、
+    /// cosine/dot はスコアがこれ以上)。
+    #[pyo3(signature = (vector, k=10, ef=None, nprobe=None, threshold=None, filter=None))]
     fn search(
         &self,
         py: Python<'_>,
         vector: &Bound<'_, PyAny>,
         k: usize,
         ef: Option<usize>,
+        nprobe: Option<usize>,
+        threshold: Option<f32>,
         filter: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<Py<PyDict>>> {
         let query = extract_vector(vector)?;
@@ -344,22 +369,59 @@ impl Collection {
                 if let Some(ef) = ef {
                     builder = builder.ef(ef);
                 }
+                if let Some(nprobe) = nprobe {
+                    builder = builder.nprobe(nprobe);
+                }
+                if let Some(t) = threshold {
+                    builder = builder.threshold(t);
+                }
                 if let Some(f) = filter {
                     builder = builder.filter(f);
                 }
                 builder.run()
             })
             .map_err(to_py_err)?;
-        hits.iter()
-            .map(|h| {
-                let d = PyDict::new(py);
-                d.set_item("id", h.id)?;
-                d.set_item("ext_id", h.ext_id())?;
-                d.set_item("score", h.score)?;
-                d.set_item("meta", meta_to_pydict(py, &h.metadata)?)?;
-                Ok(d.unbind())
+        hits_to_py(py, &hits)
+    }
+
+    /// バッチ検索 (todo 1501)。(n, dim) の numpy 行列またはリストのリストを渡すと、
+    /// **入力と同じ順**で結果のリストが返る。
+    ///
+    /// GIL を解放したうえでサーバ側がクエリ間を並列化するので、
+    /// Python のループで 1 件ずつ呼ぶより速い。
+    #[pyo3(signature = (vectors, k=10, ef=None, nprobe=None, threshold=None, filter=None))]
+    fn search_batch(
+        &self,
+        py: Python<'_>,
+        vectors: &Bound<'_, PyAny>,
+        k: usize,
+        ef: Option<usize>,
+        nprobe: Option<usize>,
+        threshold: Option<f32>,
+        filter: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Vec<Vec<Py<PyDict>>>> {
+        let queries = extract_matrix(vectors)?;
+        let filter = filter.map(extract_filter).transpose()?;
+        let col = Arc::clone(&self.inner);
+        let results = py
+            .allow_threads(move || {
+                let mut builder = col.search_batch(&queries).k(k);
+                if let Some(ef) = ef {
+                    builder = builder.ef(ef);
+                }
+                if let Some(nprobe) = nprobe {
+                    builder = builder.nprobe(nprobe);
+                }
+                if let Some(t) = threshold {
+                    builder = builder.threshold(t);
+                }
+                if let Some(f) = filter {
+                    builder = builder.filter(f);
+                }
+                builder.run()
             })
-            .collect()
+            .map_err(to_py_err)?;
+        results.iter().map(|hits| hits_to_py(py, hits)).collect()
     }
 
     /// 点参照。見つからなければ None。
