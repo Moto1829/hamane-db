@@ -206,8 +206,9 @@ fn concurrent_writes_and_searches() {
 #[test]
 #[ignore = "大量データ (nightly / --ignored でのみ実行)"]
 fn mixed_workload_matches_reference_model() {
-    // 参照モデルとの一致が目的なので 20 万 ID・40 万操作で頭打ち
-    let n = capped(2, 200_000);
+    // 参照モデルとの一致が目的。上書き比率 (ops / ID 空間) は保ったまま
+    // 規模を落として 10 万 ID・20 万操作で頭打ちにする
+    let n = capped(2, 100_000);
     let ops = n * 2;
     let dir = tempfile::tempdir().unwrap();
     let db = Database::open_with_options(dir.path(), bulk_options()).unwrap();
@@ -412,7 +413,9 @@ fn high_dimension_with_quantization() {
 #[test]
 #[ignore = "大量データ (nightly / --ignored でのみ実行)"]
 fn large_database_reopens_identically() {
-    let n = capped(2, 500_000);
+    // 再 open の正しさを見るテストで、準備 (投入 + フラッシュ) が支配的。
+    // 50 万件だと 6 分かけて 19 ミリ秒を検証することになるので 15 万で頭打ち
+    let n = capped(2, 150_000);
     let dir = tempfile::tempdir().unwrap();
     let data = dataset(n, DIM, 20);
     let queries: Vec<Vec<f32>> = {

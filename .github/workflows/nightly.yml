@@ -2,6 +2,11 @@ name: Nightly
 
 # 通常の CI (ci.yml) は数分で終わる範囲だけを回す。
 # 大量データ E2E (#[ignore] 付き、todo 1301) はここで 1 日 1 回まわす。
+#
+# scale は 3 グループに分けて並列実行する (todo 1303)。分数はパブリック
+# リポジトリなら無料なので、カバレッジを削るより並列化した方が得。
+# **グループ 3 は「他のグループで名指ししたもの以外の全部」**なので、
+# 新しい #[ignore] テストを足しても自動的にどこかで実行される (取りこぼし防止)。
 on:
   schedule:
     - cron: "0 18 * * *" # 03:00 JST
@@ -18,16 +23,64 @@ env:
 jobs:
   scale:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 100 万件の投入とフラッシュ (HNSW 構築) が支配的。単独で回す
+          - group: large-dataset
+            select: --exact large_dataset_search_stays_consistent
+          # 参照モデル照合と再 open。どちらも準備が長い。
+          # **--exact は値を取らないフラグ**なので 1 回だけ書き、
+          # テスト名は位置引数として並べる (2 回書くと libtest がエラーにする)
+          - group: workload
+            select: >-
+              --exact mixed_workload_matches_reference_model
+              large_database_reopens_identically
+          # 上記以外の全部 (新しく足した #[ignore] テストもここに入る)
+          - group: rest
+            select: >-
+              --skip large_dataset_search_stays_consistent
+              --skip mixed_workload_matches_reference_model
+              --skip large_database_reopens_identically
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Ignored tests (large data E2E)
+      - name: Ignored tests (${{ matrix.group }})
         # release でないと HNSW 構築が桁違いに遅い
-        run: cargo test --release --workspace -- --ignored --test-threads=1 --nocapture
+        run: |
+          cargo test --release --workspace -- \
+            --ignored --test-threads=1 --nocapture ${{ matrix.select }}
         env:
           HAMANE_SCALE_N: ${{ github.event.inputs.scale_n || '1000000' }}
+
+  # グループ分けの取りこぼし検出: 名指ししたテストが実在するかを確認する。
+  # (存在しない名前を --exact に書くと、そのグループは 0 件で静かに green になる)
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # 存在しない名前を位置引数に書くと、そのグループは静かに「0 tests」で
+      # green になる。改名・削除で検証が消えるのを防ぐための番犬
+      - name: 名指しテストが実在することを確認
+        run: |
+          set -euo pipefail
+          cargo test --workspace --no-run >/dev/null 2>&1
+          list=$(cargo test --workspace -- --ignored --list | sed 's/: test$//')
+          echo "$list"
+          for t in large_dataset_search_stays_consistent \
+                   mixed_workload_matches_reference_model \
+                   large_database_reopens_identically; do
+            echo "$list" | grep -qx "$t" || {
+              echo "::error::nightly.yml が名指ししている $t が存在しない (改名された?)"
+              exit 1
+            }
+          done
 
   full:
     runs-on: ubuntu-latest
