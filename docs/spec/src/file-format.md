@@ -1,5 +1,11 @@
 # オンディスクフォーマット
 
+> [WAL](glossary.md#wal-先行書き込みログ) /
+> [セグメント](glossary.md#セグメント-segment) /
+> [manifest](glossary.md#manifest) /
+> [tombstone](glossary.md#tombstone-墓標) /
+> [CRC32C](glossary.md#crc32c) の意味は [用語集](glossary.md) を参照してください。
+
 フォーマットバージョン: **v2** (manifest のみ v2。v1 は読み込み互換)。
 本章は互換実装・デバッグのための仕様です。
 より詳細な設計背景はリポジトリの `docs/design/storage.md` /
