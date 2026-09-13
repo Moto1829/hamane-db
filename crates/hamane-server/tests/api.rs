@@ -576,3 +576,76 @@ async fn patch_metadata() {
     .await;
     assert_eq!(value["records"].as_array().unwrap().len(), 20);
 }
+
+/// 改名と原子的な入れ替え (todo 1801) の HTTP 露出。
+#[tokio::test]
+async fn rename_and_swap_collections() {
+    let app = test_app();
+    for (name, n) in [("docs", 3u64), ("docs_v2", 7)] {
+        request(
+            &app,
+            "PUT",
+            &format!("/collections/{name}"),
+            Some(json!({"dim": 2, "metric": "l2"})),
+        )
+        .await;
+        let records: Vec<Value> = (0..n)
+            .map(|i| json!({"id": i, "vector": [i as f32, 0.0]}))
+            .collect();
+        request(
+            &app,
+            "POST",
+            &format!("/collections/{name}/records"),
+            Some(Value::Array(records)),
+        )
+        .await;
+    }
+
+    // 無停止切り替え: 読み手は "docs" のまま新実体を見る
+    let (status, value) = request(
+        &app,
+        "POST",
+        "/admin/collections/swap",
+        Some(json!({"a": "docs", "b": "docs_v2"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(value["swapped"], json!(["docs", "docs_v2"]));
+
+    let (_, info) = request(&app, "GET", "/collections/docs", None).await;
+    assert_eq!(info["len"].as_u64(), Some(7));
+    let (_, info) = request(&app, "GET", "/collections/docs_v2", None).await;
+    assert_eq!(info["len"].as_u64(), Some(3));
+
+    // 改名
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/collections/docs_v2/rename",
+        Some(json!({"to": "docs_old"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = request(&app, "GET", "/collections/docs_v2", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, info) = request(&app, "GET", "/collections/docs_old", None).await;
+    assert_eq!(info["len"].as_u64(), Some(3));
+
+    // 既存名への改名は 409、存在しない collection は 404
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/collections/docs_old/rename",
+        Some(json!({"to": "docs"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/admin/collections/swap",
+        Some(json!({"a": "docs", "b": "missing"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

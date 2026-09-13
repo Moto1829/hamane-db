@@ -175,3 +175,28 @@ let n = col.update_meta_by_filter(&Filter::eq("tenant", "old"))
 内部では upsert に落としているので、**WAL にはレコード全体が載ります**
 (ベクトルぶんの書き込みは発生します)。メタデータ専用の WAL レコード型は
 将来の課題です。
+
+## 改名と無停止の差し替え
+
+索引を作り直したとき (埋め込みモデルの変更、量子化構成の変更など)、
+読み手が使う名前を変えずに中身だけ差し替えられます。
+
+```rust,ignore
+// 1. 裏で新しい実体を作って投入する
+let staging = db.create_collection("docs_v2", cfg)?;
+staging.upsert_batch(records)?;
+staging.flush()?;
+
+// 2. 名前を原子的に入れ替える (読み手は "docs" のまま)
+db.swap_collections("docs", "docs_v2")?;
+
+// 3. 旧実体は "docs_v2" として残るので、検証してから捨てる
+db.drop_collection("docs_v2")?;
+```
+
+- `swap_collections` は **WAL の 1 レコード**で適用されるので、途中でプロセスが
+  落ちても「名前が重複した状態」にはなりません
+- `rename_collection(from, to)` 単体でも使えます。改名先が既にあれば
+  `CollectionExists`、対象が無ければ `CollectionNotFound`、同名なら何もしません
+- 既に取得済みの `Collection` ハンドルは古い名前を保持しますが、内部 ID で
+  動くので読み書きは続けられます

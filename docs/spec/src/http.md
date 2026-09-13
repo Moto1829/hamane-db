@@ -41,6 +41,8 @@ TLS はスコープ外です (リバースプロキシの前提)。
 | DELETE | `/collections/{name}/records/{id}` | 削除 |
 | POST | `/collections/{name}/search` | 近傍検索 |
 | POST | `/collections/{name}/search/batch` | バッチ検索 (複数クエリを 1 回で) |
+| POST | `/collections/{name}/rename` | 改名 |
+| POST | `/admin/collections/swap` | 2 つの名前を原子的に入れ替える |
 | POST | `/admin/flush` | フラッシュ |
 | POST | `/admin/compact` | コンパクション |
 | GET | `/replication/*` | レプリカ同期用 ([レプリケーション](replication.md)) |
@@ -228,6 +230,19 @@ curl -s -X POST -H "$AUTH" -H "$JSON" -d '{
     {"or":[{"eq":["year",2025]},{"eq":["year",2026]}]}
   ]}
 }' http://127.0.0.1:8080/collections/docs/search
+```
+
+### 改名と無停止の差し替え
+
+```bash
+# 改名 (既存名なら 409、対象が無ければ 404)
+curl -s -X POST -H "$AUTH" -H "$JSON" -d '{"to":"docs_old"}' \
+  http://127.0.0.1:8080/collections/docs_v2/rename
+
+# 原子的な入れ替え。読み手は "docs" のまま中身が差し替わる
+curl -s -X POST -H "$AUTH" -H "$JSON" -d '{"a":"docs","b":"docs_v2"}' \
+  http://127.0.0.1:8080/admin/collections/swap
+# {"swapped":["docs","docs_v2"]}
 ```
 
 ### 管理操作
