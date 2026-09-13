@@ -33,6 +33,8 @@ TLS はスコープ外です (リバースプロキシの前提)。
 | GET | `/collections/{name}` | 情報 (件数・セグメント構成) |
 | DELETE | `/collections/{name}` | 削除 |
 | POST | `/collections/{name}/records` | upsert (単体または配列) |
+| GET | `/collections/{name}/records` | 列挙 (`limit` / `after` / `filter`) |
+| DELETE | `/collections/{name}/records` | 条件による一括削除 |
 | GET | `/collections/{name}/records/{id}` | 点参照 |
 | DELETE | `/collections/{name}/records/{id}` | 削除 |
 | POST | `/collections/{name}/search` | 近傍検索 |
@@ -104,6 +106,33 @@ JSONL のファイルから流し込む例:
 jq -s -c . records.jsonl | curl -s -X POST -H "$AUTH" -H "$JSON" \
   --data-binary @- http://127.0.0.1:8080/collections/docs/records
 ```
+
+### 列挙 (ページング)
+
+```bash
+curl -s -H "$AUTH" 'http://127.0.0.1:8080/collections/docs/records?limit=100'
+# {"records":[{"id":1,"vector":[...],"meta":{...}}, ...], "next": 100}
+
+# next を after に渡すと続きが取れる。終端では next が null になる
+curl -s -H "$AUTH" 'http://127.0.0.1:8080/collections/docs/records?limit=100&after=100'
+
+# フィルタは JSON を URL エンコードしてクエリに載せる
+curl -s -G -H "$AUTH" http://127.0.0.1:8080/collections/docs/records \
+  --data-urlencode 'filter={"eq":["lang","ja"]}' --data 'limit=100'
+```
+
+id 昇順で、live なレコードだけが返ります。`limit` の既定は 100 です。
+
+### 条件による一括削除
+
+```bash
+curl -s -X DELETE -H "$AUTH" -H "$JSON" \
+  -d '{"filter": {"eq": ["tenant", "acme"]}}' \
+  http://127.0.0.1:8080/collections/docs/records
+# {"deleted": 42}
+```
+
+`filter` は必須です (誤って全件消さないため)。一致 0 件でも 200 で `{"deleted":0}`。
 
 ### 点参照と削除
 

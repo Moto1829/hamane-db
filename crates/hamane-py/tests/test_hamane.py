@@ -120,3 +120,35 @@ def test_batch_search_and_threshold(tmp_path):
 
     # 空のクエリ列
     assert col.search_batch([], k=5) == []
+
+
+def test_scan_count_and_bulk_delete(tmp_path):
+    """列挙・カウント・一括削除 (todos 1601, 1602)。"""
+    db = hamane.Database(str(tmp_path / "db"))
+    col = db.create_collection("docs", dim=2, metric="l2")
+    for i in range(50):
+        col.upsert(i, [float(i), 0.0], meta={"tenant": "a" if i % 5 == 0 else "b"})
+    db.flush()
+
+    # id 昇順で列挙。limit と after でページング
+    page = col.scan(limit=10)
+    assert [r["id"] for r in page] == list(range(10))
+    assert page[0]["vector"] == pytest.approx([0.0, 0.0])
+    nxt = col.scan(limit=10, after=page[-1]["id"])
+    assert [r["id"] for r in nxt] == list(range(10, 20))
+
+    # フィルタつき列挙と count
+    a_only = col.scan(limit=100, filter={"eq": ["tenant", "a"]})
+    assert len(a_only) == 10
+    assert col.count({"eq": ["tenant", "a"]}) == 10
+    assert col.count() == 50
+
+    # 一括削除
+    assert col.delete_by_filter({"eq": ["tenant", "a"]}) == 10
+    assert col.count() == 40
+    assert col.count({"eq": ["tenant", "a"]}) == 0
+    assert col.get(0) is None
+
+    # ID 指定の一括削除 (存在しないものは数えない)
+    assert col.delete_batch([1, 2, 9999]) == 2
+    assert len(col) == 38

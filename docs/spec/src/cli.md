@@ -56,6 +56,33 @@ hamane search <DB_DIR> <COLLECTION> \
 `score` は metric に応じた値です (L2 は距離、Cosine は類似度、Dot は内積)。
 文字列 ID のレコードは `ext_id` に元の文字列が入ります。
 
+### scan — レコードの列挙
+
+```sh
+hamane scan <DB_DIR> <COLLECTION> \
+    [--limit 100] [--after <ID>] [--filter '<FILTER_JSON>'] [--ids-only]
+# {"records":[{"id":1,"vector":[...],"meta":{...}}, ...],"next":100}
+```
+
+id 昇順。`next` を `--after` に渡すと続きが取れます (終端では `null`)。
+`--ids-only` はベクトルを省くので、一覧やパイプ処理に向きます。
+
+### count — 件数
+
+```sh
+hamane count <DB_DIR> <COLLECTION> [--filter '<FILTER_JSON>']
+# {"count":100}
+```
+
+### delete — 条件による一括削除
+
+```sh
+hamane delete <DB_DIR> <COLLECTION> --filter '{"eq":["tenant","acme"]}'
+# {"deleted":42}
+```
+
+`--filter` は必須です (誤って全件消さないため)。
+
 ### info — 状態表示
 
 ```sh
@@ -153,6 +180,20 @@ hamane info ./db     # セグメント構成を確認
 hamane backup ./db /backup/hamane-$(date +%Y%m%d)
 # 復元は「そのディレクトリを開くだけ」
 hamane info /backup/hamane-20260910
+```
+
+### 全件をエクスポートする
+
+`scan` の `next` をカーソルにして回します。
+
+```sh
+after=""
+while :; do
+  out=$(hamane scan ./db docs --limit 1000 ${after:+--after "$after"})
+  echo "$out" | jq -c '.records[]'
+  after=$(echo "$out" | jq -r '.next')
+  [ "$after" = "null" ] && break
+done > export.jsonl
 ```
 
 ### 検索結果を後段に渡す

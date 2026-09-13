@@ -251,3 +251,74 @@ fn cli_search_accepts_nprobe() {
     let value: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(value["hits"][0]["id"].as_u64(), Some(1000), "got {out}");
 }
+
+/// scan / count / delete --filter (todos 1601, 1602)。
+#[test]
+fn cli_scan_count_and_delete_by_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let db_arg = path.to_str().unwrap();
+
+    run(&["create", db_arg, "docs", "--dim", "4", "--metric", "l2"]);
+    insert_jsonl(&path, "docs", &jsonl(100));
+    run(&["flush", db_arg]);
+
+    // 列挙は id 昇順。limit と next カーソルが効く
+    let out = run(&["scan", db_arg, "docs", "--limit", "10"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let ids: Vec<u64> = v["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_u64().unwrap())
+        .collect();
+    assert_eq!(ids, (0..10).collect::<Vec<u64>>());
+    assert_eq!(v["next"].as_u64(), Some(9));
+
+    let out = run(&["scan", db_arg, "docs", "--limit", "10", "--after", "9"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let ids: Vec<u64> = v["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_u64().unwrap())
+        .collect();
+    assert_eq!(ids, (10..20).collect::<Vec<u64>>());
+
+    // --ids-only はベクトルを省く
+    let out = run(&["scan", db_arg, "docs", "--limit", "1", "--ids-only"]);
+    assert!(!out.contains("\"vector\""), "got {out}");
+
+    // count (フィルタあり/なし)
+    let out = run(&["count", db_arg, "docs"]);
+    assert!(out.contains("\"count\":100"), "got {out}");
+    let out = run(&[
+        "count",
+        db_arg,
+        "docs",
+        "--filter",
+        r#"{"eq":["lang","ja"]}"#,
+    ]);
+    assert!(out.contains("\"count\":50"), "got {out}");
+
+    // 一括削除
+    let out = run(&[
+        "delete",
+        db_arg,
+        "docs",
+        "--filter",
+        r#"{"eq":["lang","ja"]}"#,
+    ]);
+    assert!(out.contains("\"deleted\":50"), "got {out}");
+    let out = run(&["count", db_arg, "docs"]);
+    assert!(out.contains("\"count\":50"), "got {out}");
+    // 残ったのは en だけ
+    let out = run(&[
+        "count",
+        db_arg,
+        "docs",
+        "--filter",
+        r#"{"eq":["lang","en"]}"#,
+    ]);
+    assert!(out.contains("\"count\":50"), "got {out}");
+}

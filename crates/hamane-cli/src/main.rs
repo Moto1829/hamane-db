@@ -83,6 +83,37 @@ enum Command {
     Flush { db: PathBuf },
     /// セグメントを統合して上書き・削除を物理適用する
     Compact { db: PathBuf },
+    /// レコードを id 昇順で列挙する (todo 1601)
+    Scan {
+        db: PathBuf,
+        collection: String,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        /// この ID の次から (前ページの最後の ID)
+        #[arg(long)]
+        after: Option<String>,
+        /// フィルタ (JSON)
+        #[arg(long)]
+        filter: Option<String>,
+        /// ベクトルを省いて id とメタデータだけ出す
+        #[arg(long)]
+        ids_only: bool,
+    },
+    /// 条件に一致する件数を数える (todo 1601)
+    Count {
+        db: PathBuf,
+        collection: String,
+        #[arg(long)]
+        filter: Option<String>,
+    },
+    /// 条件に一致するレコードを一括削除する (todo 1602)
+    Delete {
+        db: PathBuf,
+        collection: String,
+        /// フィルタ (JSON)。必須 (誤って全消しするのを防ぐ)
+        #[arg(long)]
+        filter: String,
+    },
     /// 一貫性のあるバックアップを取る (dest は空ディレクトリ)
     Backup { db: PathBuf, dest: PathBuf },
 }
@@ -181,6 +212,70 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 println!("{out}");
             }
         }
+        Command::Scan {
+            db,
+            collection,
+            limit,
+            after,
+            filter,
+            ids_only,
+        } => {
+            let db = Database::open(&db)?;
+            let col = db.collection(&collection)?;
+            let mut builder = col.scan().limit(limit);
+            if let Some(f) = &filter {
+                builder = builder.filter(parse_filter(&serde_json::from_str(f)?)?);
+            }
+            if let Some(a) = after {
+                builder = builder.after(parse_record_id(&a));
+            }
+            let records = builder.run()?;
+            let next = records.last().map(|r| id_to_json(&r.id));
+            let items: Vec<Value> = records
+                .iter()
+                .map(|r| {
+                    if ids_only {
+                        json!({"id": id_to_json(&r.id), "meta": meta_to_json(&r.metadata)})
+                    } else {
+                        json!({
+                            "id": id_to_json(&r.id),
+                            "vector": r.vector,
+                            "meta": meta_to_json(&r.metadata),
+                        })
+                    }
+                })
+                .collect();
+            // 件数が limit 未満ならそこで終端 (next は null)
+            let next = if items.len() < limit {
+                Value::Null
+            } else {
+                next.unwrap_or(Value::Null)
+            };
+            println!("{}", json!({"records": items, "next": next}));
+        }
+        Command::Count {
+            db,
+            collection,
+            filter,
+        } => {
+            let db = Database::open(&db)?;
+            let col = db.collection(&collection)?;
+            let parsed = match &filter {
+                Some(f) => Some(parse_filter(&serde_json::from_str(f)?)?),
+                None => None,
+            };
+            println!("{}", json!({"count": col.count(parsed.as_ref())?}));
+        }
+        Command::Delete {
+            db,
+            collection,
+            filter,
+        } => {
+            let db = Database::open(&db)?;
+            let col = db.collection(&collection)?;
+            let f = parse_filter(&serde_json::from_str(&filter)?)?;
+            println!("{}", json!({"deleted": col.delete_by_filter(&f)?}));
+        }
         Command::Info { db } => {
             let db = Database::open(&db)?;
             let collections: Vec<Value> = db
@@ -266,6 +361,22 @@ fn json_to_meta(v: &Value) -> Result<MetaValue, Box<dyn std::error::Error>> {
             }
         }
         _ => Err("meta values must be string/number/bool".into()),
+    }
+}
+
+/// 文字列を RecordId に (数値に見えるものは u64 として扱う。insert と同じ規則)。
+fn parse_record_id(s: &str) -> hamane::RecordId {
+    match s.parse::<u64>() {
+        Ok(n) => hamane::RecordId::Num(n),
+        Err(_) => hamane::RecordId::Str(s.to_owned()),
+    }
+}
+
+/// RecordId を JSON に (u64 は数値、文字列 ID は文字列)。
+fn id_to_json(id: &hamane::RecordId) -> Value {
+    match id {
+        hamane::RecordId::Num(n) => json!(n),
+        hamane::RecordId::Str(s) => json!(s),
     }
 }
 

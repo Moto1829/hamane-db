@@ -237,6 +237,182 @@ impl Collection {
         }
     }
 
+    /// レコードを **id 昇順**で列挙する (todo 1601)。
+    ///
+    /// `get(id)` と近傍検索しか無かったので、エクスポートや
+    /// 「この条件のレコードを全部見る」ができなかった。
+    ///
+    /// ```
+    /// # use hamane::{CollectionConfig, Database, Metric, Record};
+    /// # fn main() -> hamane::Result<()> {
+    /// # let db = Database::in_memory();
+    /// # let col = db.create_collection("docs", CollectionConfig { dim: 2, metric: Metric::L2 })?;
+    /// # for i in 0..5u64 { col.upsert(Record::new(i, vec![i as f32, 0.0]))?; }
+    /// // 先頭 2 件 → 続きは最後の id をカーソルにする
+    /// let page = col.scan().limit(2).run()?;
+    /// let next = col.scan().after(page.last().unwrap().id.clone()).limit(2).run()?;
+    /// # assert_eq!(page.len(), 2);
+    /// # assert_eq!(next.len(), 2);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn scan(&self) -> ScanBuilder<'_> {
+        ScanBuilder {
+            collection: self,
+            filter: None,
+            limit: None,
+            after: None,
+        }
+    }
+
+    /// 条件に一致する live なレコード数 (todo 1601)。
+    ///
+    /// フィルタなしなら `len()` と同じ (O(1))。フィルタありは全件を走査する。
+    pub fn count(&self, filter: Option<&Filter>) -> Result<usize> {
+        match filter {
+            None => Ok(self.len()),
+            Some(f) => {
+                let mut n = 0;
+                self.walk(Some(f), None, None, |_| {
+                    n += 1;
+                    true
+                })?;
+                Ok(n)
+            }
+        }
+    }
+
+    /// 複数 ID をまとめて削除する (todo 1602)。戻り値は実際に消えた件数。
+    /// WAL の sync は 1 回にまとまる (`upsert_batch` と対称)。
+    pub fn delete_batch(
+        &self,
+        ids: impl IntoIterator<Item = impl Into<RecordId>>,
+    ) -> Result<usize> {
+        let mut internal = Vec::new();
+        for id in ids {
+            match id.into() {
+                RecordId::Num(n) => internal.push(n),
+                RecordId::Str(s) => {
+                    if let Some(n) = self.store.resolve_ext_id(self.collection_id, &s)? {
+                        internal.push(n);
+                    }
+                }
+            }
+        }
+        self.store.delete_batch(self.collection_id, &internal)
+    }
+
+    /// メタデータ条件に一致するレコードを全て削除する (todo 1602)。
+    /// 戻り値は消えた件数 (一致 0 件なら 0)。
+    ///
+    /// 内部では ID をチャンクに区切って集め、`delete_batch` に流す
+    /// (大量削除で ID の配列がメモリを食い潰さないため)。
+    pub fn delete_by_filter(&self, filter: &Filter) -> Result<usize> {
+        const CHUNK: usize = 10_000;
+        let mut deleted = 0;
+        loop {
+            // 削除しながら走査すると view がずれるので、1 チャンク集めてから消す
+            let mut ids = Vec::new();
+            self.walk(Some(filter), Some(CHUNK), None, |rec| {
+                ids.push(rec.id.clone());
+                true
+            })?;
+            if ids.is_empty() {
+                return Ok(deleted);
+            }
+            deleted += self.delete_batch(ids)?;
+        }
+    }
+
+    /// 全ソースを id 昇順に歩き、live なレコードを `visit` に渡す (todo 1601)。
+    ///
+    /// - 各ソース (memtable / セグメント) は既に id 昇順なので k-way マージする
+    /// - `limit` に達したら**そこで打ち切る** (全件走査しない)
+    /// - `visit` が false を返しても打ち切る
+    fn walk(
+        &self,
+        filter: Option<&Filter>,
+        limit: Option<usize>,
+        after: Option<Id>,
+        mut visit: impl FnMut(Record) -> bool,
+    ) -> Result<()> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+
+        let view = self.store.view(self.collection_id)?;
+        // memtable は HashMap なので id 順に並べ直す (フラッシュ閾値ぶんの件数)
+        let mut sources: Vec<Vec<Id>> = view
+            .memtables()
+            .iter()
+            .map(|mt| {
+                let mut ids: Vec<Id> = mt.iter().map(|(id, _, _)| id).collect();
+                ids.sort_unstable();
+                ids
+            })
+            .collect();
+        // セグメントの行は id 昇順 (SegmentWriter が id でソートして書く)
+        let segment_ids: Vec<Vec<Id>> = view
+            .segments
+            .iter()
+            .map(|seg| (0..seg.len() as u32).map(|row| seg.id(row)).collect())
+            .collect();
+        sources.extend(segment_ids);
+
+        // after より大きい最初の位置へ各カーソルを進める
+        let mut cursors: Vec<usize> = sources
+            .iter()
+            .map(|ids| match after {
+                Some(a) => ids.partition_point(|id| *id <= a),
+                None => 0,
+            })
+            .collect();
+
+        let mut heap: BinaryHeap<Reverse<(Id, usize)>> = BinaryHeap::new();
+        for (i, ids) in sources.iter().enumerate() {
+            if let Some(id) = ids.get(cursors[i]) {
+                heap.push(Reverse((*id, i)));
+            }
+        }
+
+        let mut emitted = 0;
+        let mut last: Option<Id> = None;
+        while let Some(Reverse((id, source))) = heap.pop() {
+            // 次の候補を同じソースから補充する
+            cursors[source] += 1;
+            if let Some(next) = sources[source].get(cursors[source]) {
+                heap.push(Reverse((*next, source)));
+            }
+            // 複数ソースに同じ id があれば 1 回だけ扱う (newest-wins は get が解決)
+            if last == Some(id) {
+                continue;
+            }
+            last = Some(id);
+
+            // get が None = 削除済み (tombstone) または shadow された行
+            let Some(stored) = view.get(id) else {
+                continue;
+            };
+            if let Some(f) = filter {
+                if !f.matches(&stored.metadata) {
+                    continue;
+                }
+            }
+            let record = Record {
+                id: record_id_of(id, &stored.metadata),
+                vector: stored.vector,
+                metadata: stored.metadata,
+            };
+            if !visit(record) {
+                return Ok(());
+            }
+            emitted += 1;
+            if Some(emitted) == limit {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
     /// 次元・数値の検証と、メトリックに応じた正規化。
     fn prepare_vector(&self, mut vector: Vec<f32>) -> Result<Vec<f32>> {
         if vector.len() != self.config.dim {
@@ -761,6 +937,73 @@ impl<'a> SearchBuilder<'a> {
             self.nprobe,
             self.threshold,
         )
+    }
+}
+
+/// 内部 id とメタデータから、利用者に見せる `RecordId` を決める。
+/// 文字列 ID で入れたレコードは `_ext_id` を持つのでそちらを返す。
+fn record_id_of(id: Id, metadata: &Metadata) -> RecordId {
+    match metadata.get(hamane_core::EXT_ID_META_KEY) {
+        Some(hamane_core::MetaValue::Str(s)) => RecordId::Str(s.clone()),
+        _ => RecordId::Num(id),
+    }
+}
+
+/// レコードを id 昇順に列挙するビルダー (todo 1601)。
+///
+/// `Collection::scan` から作る。`after` + `limit` でページングできる。
+pub struct ScanBuilder<'a> {
+    collection: &'a Collection,
+    filter: Option<Filter>,
+    limit: Option<usize>,
+    after: Option<RecordId>,
+}
+
+impl ScanBuilder<'_> {
+    /// メタデータフィルタ。
+    pub fn filter(mut self, filter: Filter) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    /// 返す件数の上限。指定しなければ全件。
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// この ID **より後ろ**から返す (前ページの最後の ID を渡す)。
+    ///
+    /// 内部 id の昇順なので、文字列 ID を渡した場合も内部 id に解決して比較する。
+    pub fn after(mut self, id: impl Into<RecordId>) -> Self {
+        self.after = Some(id.into());
+        self
+    }
+
+    /// 実行する。結果は id 昇順。
+    pub fn run(self) -> Result<Vec<Record>> {
+        let after = match &self.after {
+            None => None,
+            Some(RecordId::Num(n)) => Some(*n),
+            Some(RecordId::Str(s)) => {
+                match self
+                    .collection
+                    .store
+                    .resolve_ext_id(self.collection.collection_id, s)?
+                {
+                    Some(id) => Some(id),
+                    // 解決できない ID をカーソルにされたら「該当なし」が自然
+                    None => return Ok(Vec::new()),
+                }
+            }
+        };
+        let mut out = Vec::new();
+        self.collection
+            .walk(self.filter.as_ref(), self.limit, after, |rec| {
+                out.push(rec);
+                true
+            })?;
+        Ok(out)
     }
 }
 
