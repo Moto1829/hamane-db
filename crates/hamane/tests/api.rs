@@ -436,3 +436,141 @@ fn delete_by_filter_removes_matching_records() {
     assert_eq!(n, 2);
     assert_eq!(col.len(), 73);
 }
+
+/// メタデータのみの更新 (todo 1701)。
+#[test]
+fn update_meta_merges_and_removes_keys() {
+    let db = Database::in_memory();
+    let col = db
+        .create_collection(
+            "docs",
+            CollectionConfig {
+                dim: 2,
+                metric: Metric::L2,
+            },
+        )
+        .unwrap();
+    col.upsert(
+        Record::new(1u64, vec![1.0, 2.0])
+            .with_meta("lang", "ja")
+            .with_meta("draft", true)
+            .with_meta("year", 2026i64),
+    )
+    .unwrap();
+
+    // set はマージ (触れていないキーは残る)、remove は消える
+    let n = col
+        .update_meta(1u64)
+        .set("lang", "en")
+        .set("tenant", "acme")
+        .remove("draft")
+        .remove("no_such_key") // 存在しないキーの remove はエラーにしない
+        .run()
+        .unwrap();
+    assert_eq!(n, 1);
+
+    let rec = col.get(1u64).unwrap();
+    assert_eq!(rec.vector, vec![1.0, 2.0], "ベクトルは変わらない");
+    assert_eq!(rec.metadata.get("lang"), Some(&MetaValue::Str("en".into())));
+    assert_eq!(
+        rec.metadata.get("tenant"),
+        Some(&MetaValue::Str("acme".into()))
+    );
+    assert_eq!(
+        rec.metadata.get("year"),
+        Some(&MetaValue::Int(2026)),
+        "触れていないキーは保持"
+    );
+    assert!(
+        !rec.metadata.contains_key("draft"),
+        "remove したキーは消える"
+    );
+
+    // 存在しない ID は 0 (エラーにしない)
+    assert_eq!(col.update_meta(999u64).set("a", 1i64).run().unwrap(), 0);
+    // 何も指定しなければ 0
+    assert_eq!(col.update_meta(1u64).run().unwrap(), 0);
+
+    // _ext_id は触らせない
+    assert!(col
+        .update_meta(1u64)
+        .set(hamane::EXT_ID_META_KEY, "hack")
+        .run()
+        .is_err());
+    assert!(col
+        .update_meta(1u64)
+        .remove(hamane::EXT_ID_META_KEY)
+        .run()
+        .is_err());
+
+    // 検索結果にも反映される
+    let hit = &col.search(&[1.0, 2.0]).k(1).run().unwrap()[0];
+    assert_eq!(hit.metadata.get("lang"), Some(&MetaValue::Str("en".into())));
+}
+
+/// 条件による一括更新 (todo 1701)。更新後も一致し続ける条件でも停止すること。
+#[test]
+fn update_meta_by_filter_updates_all_matching() {
+    let db = Database::in_memory();
+    let col = db
+        .create_collection(
+            "docs",
+            CollectionConfig {
+                dim: 2,
+                metric: Metric::L2,
+            },
+        )
+        .unwrap();
+    for i in 0..2_500u64 {
+        col.upsert(
+            Record::new(i, vec![i as f32, 0.0])
+                .with_meta("tenant", if i % 5 == 0 { "old" } else { "keep" }),
+        )
+        .unwrap();
+    }
+    col.flush().unwrap(); // セグメント上のレコードも更新できること
+
+    // 更新後も一致し続ける条件 (tenant=old のまま public を足す)。
+    // カーソルで進めないと無限ループになるケース
+    let n = col
+        .update_meta_by_filter(&Filter::eq("tenant", "old"))
+        .set("public", true)
+        .run()
+        .unwrap();
+    assert_eq!(n, 500);
+    assert_eq!(
+        col.count(Some(&Filter::eq("public", MetaValue::Bool(true))))
+            .unwrap(),
+        500
+    );
+
+    // 一致しないものは無傷
+    for rec in col
+        .scan()
+        .filter(Filter::eq("tenant", "keep"))
+        .run()
+        .unwrap()
+    {
+        assert!(!rec.metadata.contains_key("public"));
+    }
+
+    // 付け替え (一致しなくなる方向) も動く
+    let n = col
+        .update_meta_by_filter(&Filter::eq("tenant", "old"))
+        .set("tenant", "new")
+        .run()
+        .unwrap();
+    assert_eq!(n, 500);
+    assert_eq!(col.count(Some(&Filter::eq("tenant", "old"))).unwrap(), 0);
+    assert_eq!(col.count(Some(&Filter::eq("tenant", "new"))).unwrap(), 500);
+
+    // 一致 0 件は 0
+    assert_eq!(
+        col.update_meta_by_filter(&Filter::eq("tenant", "zzz"))
+            .set("x", 1i64)
+            .run()
+            .unwrap(),
+        0
+    );
+    assert_eq!(col.len(), 2_500, "件数は変わらない");
+}

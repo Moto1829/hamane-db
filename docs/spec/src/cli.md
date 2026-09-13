@@ -74,6 +74,23 @@ hamane count <DB_DIR> <COLLECTION> [--filter '<FILTER_JSON>']
 # {"count":100}
 ```
 
+### update-meta — メタデータの更新
+
+```sh
+# 単体
+hamane update-meta <DB_DIR> <COLLECTION> --id <ID> \
+    [--set key=value]... [--remove key]...
+
+# 条件による一括
+hamane update-meta <DB_DIR> <COLLECTION> --filter '<FILTER_JSON>' \
+    [--set key=value]... [--remove key]...
+# {"updated":42}
+```
+
+`--set` の値は **JSON として解釈**します (`year=2026` は数値、`public=true` は
+真偽値、読めなければ文字列)。`--id` と `--filter` は排他です。
+ベクトルは変更されません。
+
 ### delete — 条件による一括削除
 
 ```sh

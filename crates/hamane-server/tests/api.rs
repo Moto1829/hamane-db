@@ -497,3 +497,82 @@ async fn scan_and_delete_by_filter() {
     let (_, info) = request(&app, "GET", "/collections/docs", None).await;
     assert_eq!(info["len"].as_u64(), Some(15));
 }
+
+/// メタデータ更新 (todo 1701) の HTTP 露出。
+#[tokio::test]
+async fn patch_metadata() {
+    let app = test_app();
+    request(
+        &app,
+        "PUT",
+        "/collections/docs",
+        Some(json!({"dim": 2, "metric": "l2"})),
+    )
+    .await;
+    let records: Vec<Value> = (0..20u64)
+        .map(|i| json!({"id": i, "vector": [i as f32, 0.0], "meta": {"lang": "ja", "draft": true}}))
+        .collect();
+    request(
+        &app,
+        "POST",
+        "/collections/docs/records",
+        Some(Value::Array(records)),
+    )
+    .await;
+
+    // 単体: set はマージ、remove は削除。ベクトルは変わらない
+    let (status, value) = request(
+        &app,
+        "PATCH",
+        "/collections/docs/records/3",
+        Some(json!({"set": {"tenant": "acme"}, "remove": ["draft"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(value["updated"].as_u64(), Some(1));
+
+    let (_, rec) = request(&app, "GET", "/collections/docs/records/3", None).await;
+    assert_eq!(rec["meta"]["tenant"], json!("acme"));
+    assert_eq!(rec["meta"]["lang"], json!("ja"), "触れていないキーは残る");
+    assert!(rec["meta"].get("draft").is_none());
+    assert_eq!(rec["vector"], json!([3.0, 0.0]));
+
+    // 存在しない ID は 404
+    let (status, _) = request(
+        &app,
+        "PATCH",
+        "/collections/docs/records/999",
+        Some(json!({"set": {"a": 1}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // 一括: filter 必須
+    let (status, _) = request(
+        &app,
+        "PATCH",
+        "/collections/docs/records",
+        Some(json!({"set": {"a": 1}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, value) = request(
+        &app,
+        "PATCH",
+        "/collections/docs/records",
+        Some(json!({"filter": {"eq": ["lang", "ja"]}, "set": {"reviewed": true}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(value["updated"].as_u64(), Some(20));
+
+    let (_, value) = request(
+        &app,
+        "GET",
+        "/collections/docs/records?limit=100&filter=%7B%22eq%22%3A%5B%22reviewed%22%2Ctrue%5D%7D",
+        None,
+    )
+    .await;
+    assert_eq!(value["records"].as_array().unwrap().len(), 20);
+}

@@ -322,3 +322,94 @@ fn cli_scan_count_and_delete_by_filter() {
     ]);
     assert!(out.contains("\"count\":50"), "got {out}");
 }
+
+/// update-meta (todo 1701): 単体と条件による一括。
+#[test]
+fn cli_update_meta() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let db_arg = path.to_str().unwrap();
+
+    run(&["create", db_arg, "docs", "--dim", "4", "--metric", "l2"]);
+    insert_jsonl(&path, "docs", &jsonl(20));
+    run(&["flush", db_arg]);
+
+    // 単体: set はマージ、remove は削除。値は JSON として解釈される
+    let out = run(&[
+        "update-meta",
+        db_arg,
+        "docs",
+        "--id",
+        "3",
+        "--set",
+        "year=2026",
+        "--set",
+        "tenant=acme",
+        "--set",
+        "public=true",
+        "--remove",
+        "lang",
+    ]);
+    assert!(out.contains("\"updated\":1"), "got {out}");
+
+    let out = run(&[
+        "scan",
+        db_arg,
+        "docs",
+        "--limit",
+        "1",
+        "--after",
+        "2",
+        "--ids-only",
+    ]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let meta = &v["records"][0]["meta"];
+    assert_eq!(
+        meta["year"],
+        serde_json::json!(2026),
+        "数値として入る: {meta}"
+    );
+    assert_eq!(meta["public"], serde_json::json!(true), "真偽値として入る");
+    assert_eq!(meta["tenant"], serde_json::json!("acme"));
+    assert!(meta.get("lang").is_none(), "remove したキーは消える");
+
+    // 一括。奇数 id の 10 件が lang=en だが、id=3 は直前に lang を消したので 9 件
+    let out = run(&[
+        "update-meta",
+        db_arg,
+        "docs",
+        "--filter",
+        r#"{"eq":["lang","en"]}"#,
+        "--set",
+        "reviewed=true",
+    ]);
+    assert!(out.contains("\"updated\":9"), "got {out}");
+    let out = run(&[
+        "count",
+        db_arg,
+        "docs",
+        "--filter",
+        r#"{"eq":["reviewed",true]}"#,
+    ]);
+    assert!(out.contains("\"count\":9"), "got {out}");
+
+    // --id と --filter の同時指定は弾かれる
+    let out = cli()
+        .args([
+            "update-meta",
+            db_arg,
+            "docs",
+            "--id",
+            "1",
+            "--filter",
+            "{}",
+            "--set",
+            "a=1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "--id と --filter の併用は失敗するべき"
+    );
+}

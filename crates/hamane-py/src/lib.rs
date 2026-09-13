@@ -474,6 +474,61 @@ impl Collection {
             .map_err(to_py_err)
     }
 
+    /// メタデータだけを更新する (todo 1701)。ベクトルは変わらない。
+    ///
+    /// `set` は dict (マージ。触れていないキーは残る)、`remove` はキーのリスト。
+    /// 戻り値は更新件数 (対象が無ければ 0)。
+    #[pyo3(signature = (id, set=None, remove=None))]
+    fn update_meta(
+        &self,
+        py: Python<'_>,
+        id: &Bound<'_, PyAny>,
+        set: Option<&Bound<'_, PyDict>>,
+        remove: Option<Vec<String>>,
+    ) -> PyResult<usize> {
+        let rid = extract_record_id(id)?;
+        let set = set.map(extract_metadata).transpose()?.unwrap_or_default();
+        let remove = remove.unwrap_or_default();
+        let col = Arc::clone(&self.inner);
+        py.allow_threads(move || {
+            let mut update = col.update_meta(rid);
+            for (key, value) in set {
+                update = update.set(key, value);
+            }
+            for key in remove {
+                update = update.remove(key);
+            }
+            update.run()
+        })
+        .map_err(to_py_err)
+    }
+
+    /// 条件に一致するレコードのメタデータをまとめて更新する (todo 1701)。
+    #[pyo3(signature = (filter, set=None, remove=None))]
+    fn update_meta_by_filter(
+        &self,
+        py: Python<'_>,
+        filter: &Bound<'_, PyAny>,
+        set: Option<&Bound<'_, PyDict>>,
+        remove: Option<Vec<String>>,
+    ) -> PyResult<usize> {
+        let filter = extract_filter(filter)?;
+        let set = set.map(extract_metadata).transpose()?.unwrap_or_default();
+        let remove = remove.unwrap_or_default();
+        let col = Arc::clone(&self.inner);
+        py.allow_threads(move || {
+            let mut update = col.update_meta_by_filter(&filter);
+            for (key, value) in set {
+                update = update.set(key, value);
+            }
+            for key in remove {
+                update = update.remove(key);
+            }
+            update.run()
+        })
+        .map_err(to_py_err)
+    }
+
     /// 条件に一致するレコードを一括削除する (todo 1602)。削除件数を返す。
     fn delete_by_filter(&self, py: Python<'_>, filter: &Bound<'_, PyAny>) -> PyResult<usize> {
         let filter = extract_filter(filter)?;

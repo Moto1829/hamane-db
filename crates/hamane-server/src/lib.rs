@@ -9,6 +9,8 @@
 //! | POST | /collections/{name}/records | upsert (単発 or 配列) |
 //! | GET | /collections/{name}/records | 列挙 (limit / after / filter) |
 //! | DELETE | /collections/{name}/records | 条件による一括削除 (filter) |
+//! | PATCH | /collections/{name}/records/{id} | メタデータ更新 (set / remove) |
+//! | PATCH | /collections/{name}/records | 条件によるメタデータ一括更新 |
 //! | GET | /collections/{name}/records/{id} | 点参照 |
 //! | DELETE | /collections/{name}/records/{id} | レコード削除 |
 //! | POST | /collections/{name}/search | 検索 (vector, k, ef, nprobe, threshold, filter) |
@@ -69,11 +71,14 @@ pub fn router_with_auth(db: Arc<Database>, api_key: Option<String>) -> Router {
             "/collections/{name}/records",
             post(upsert_records)
                 .get(scan_records)
-                .delete(delete_records),
+                .delete(delete_records)
+                .patch(update_records_meta),
         )
         .route(
             "/collections/{name}/records/{id}",
-            get(get_record).delete(delete_record),
+            get(get_record)
+                .delete(delete_record)
+                .patch(update_record_meta),
         )
         .route("/collections/{name}/search", post(search))
         .route("/collections/{name}/search/batch", post(search_batch))
@@ -667,6 +672,73 @@ async fn delete_records(
         let col = db.collection(&name)?;
         let deleted = col.delete_by_filter(&filter)?;
         Ok(Json(json!({ "deleted": deleted })))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct MetaPatchBody {
+    /// 設定するキー (マージ。触れていないキーは残る)
+    #[serde(default)]
+    set: serde_json::Map<String, Value>,
+    /// 削除するキー
+    #[serde(default)]
+    remove: Vec<String>,
+    /// 一括更新のときだけ使う条件
+    filter: Option<Value>,
+}
+
+/// パッチを builder に積む (単体・一括で共通)。
+fn apply_patch<'a>(
+    mut update: hamane::MetaUpdate<'a>,
+    body: &MetaPatchBody,
+) -> Result<hamane::MetaUpdate<'a>, ApiError> {
+    for (key, value) in &body.set {
+        update = update.set(key.clone(), json_to_meta(value)?);
+    }
+    for key in &body.remove {
+        update = update.remove(key.clone());
+    }
+    Ok(update)
+}
+
+/// 1 レコードのメタデータ更新 (todo 1701)。ベクトルは変わらない。
+async fn update_record_meta(
+    State(state): State<AppState>,
+    Path((name, id)): Path<(String, String)>,
+    Json(body): Json<MetaPatchBody>,
+) -> Result<Json<Value>, ApiError> {
+    let db = Arc::clone(&state.db);
+    blocking(move || {
+        let col = db.collection(&name)?;
+        let update = apply_patch(col.update_meta(record_id_from_path(&id)), &body)?;
+        let updated = update.run()?;
+        if updated == 0 {
+            return Err(ApiError(
+                StatusCode::NOT_FOUND,
+                format!("record not found: {id}"),
+            ));
+        }
+        Ok(Json(json!({ "updated": updated })))
+    })
+    .await
+}
+
+/// 条件によるメタデータ一括更新 (todo 1701)。
+async fn update_records_meta(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<MetaPatchBody>,
+) -> Result<Json<Value>, ApiError> {
+    let filter = match &body.filter {
+        Some(v) => parse_filter(v)?,
+        None => return Err(bad_request("filter is required for bulk metadata update")),
+    };
+    let db = Arc::clone(&state.db);
+    blocking(move || {
+        let col = db.collection(&name)?;
+        let update = apply_patch(col.update_meta_by_filter(&filter), &body)?;
+        Ok(Json(json!({ "updated": update.run()? })))
     })
     .await
 }

@@ -237,6 +237,63 @@ impl Collection {
         }
     }
 
+    /// メタデータだけを更新する (todo 1701)。ベクトルは変更しない。
+    ///
+    /// **マージ意味論**: `set` したキーだけ上書きし、触れていないキーは残る。
+    /// 消したいものは `remove` で明示する。
+    ///
+    /// ```
+    /// # use hamane::{CollectionConfig, Database, Metric, Record};
+    /// # fn main() -> hamane::Result<()> {
+    /// # let db = Database::in_memory();
+    /// # let col = db.create_collection("docs", CollectionConfig { dim: 2, metric: Metric::L2 })?;
+    /// col.upsert(Record::new(1u64, vec![1.0, 0.0]).with_meta("lang", "ja").with_meta("draft", true))?;
+    /// col.update_meta(1u64).set("lang", "en").remove("draft").run()?;
+    /// let rec = col.get(1u64).unwrap();
+    /// assert_eq!(rec.vector, vec![1.0, 0.0]); // ベクトルはそのまま
+    /// assert!(rec.metadata.get("draft").is_none());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn update_meta(&self, id: impl Into<RecordId>) -> MetaUpdate<'_> {
+        MetaUpdate {
+            collection: self,
+            target: UpdateTarget::One(id.into()),
+            set: Metadata::new(),
+            remove: Vec::new(),
+        }
+    }
+
+    /// 条件に一致するレコードのメタデータをまとめて更新する (todo 1701)。
+    /// 戻り値は更新件数。
+    pub fn update_meta_by_filter(&self, filter: &Filter) -> MetaUpdate<'_> {
+        MetaUpdate {
+            collection: self,
+            target: UpdateTarget::Filter(filter.clone()),
+            set: Metadata::new(),
+            remove: Vec::new(),
+        }
+    }
+
+    /// パッチを 1 レコードに適用して upsert する。更新できたら true。
+    fn apply_meta_patch(
+        &self,
+        id: &RecordId,
+        set: &Metadata,
+        remove: &[String],
+    ) -> Result<Option<Record>> {
+        let Some(mut record) = self.get(id.clone()) else {
+            return Ok(None);
+        };
+        for key in remove {
+            record.metadata.remove(key);
+        }
+        for (key, value) in set {
+            record.metadata.insert(key.clone(), value.clone());
+        }
+        Ok(Some(record))
+    }
+
     /// レコードを **id 昇順**で列挙する (todo 1601)。
     ///
     /// `get(id)` と近傍検索しか無かったので、エクスポートや
@@ -946,6 +1003,103 @@ fn record_id_of(id: Id, metadata: &Metadata) -> RecordId {
     match metadata.get(hamane_core::EXT_ID_META_KEY) {
         Some(hamane_core::MetaValue::Str(s)) => RecordId::Str(s.clone()),
         _ => RecordId::Num(id),
+    }
+}
+
+/// メタデータ更新の対象。
+enum UpdateTarget {
+    One(RecordId),
+    Filter(Filter),
+}
+
+/// メタデータだけを更新するビルダー (todo 1701)。
+///
+/// `Collection::update_meta` / `update_meta_by_filter` から作る。
+/// **ベクトルは変更されない**が、内部的には upsert なので WAL には
+/// レコード全体が載る (メタデータ専用の WAL レコード型は将来の課題)。
+pub struct MetaUpdate<'a> {
+    collection: &'a Collection,
+    target: UpdateTarget,
+    set: Metadata,
+    remove: Vec<String>,
+}
+
+impl MetaUpdate<'_> {
+    /// キーを設定する (既存の値は上書き、無ければ追加)。
+    pub fn set(mut self, key: impl Into<String>, value: impl Into<hamane_core::MetaValue>) -> Self {
+        self.set.insert(key.into(), value.into());
+        self
+    }
+
+    /// キーを削除する。存在しなくてもエラーにはならない。
+    pub fn remove(mut self, key: impl Into<String>) -> Self {
+        self.remove.push(key.into());
+        self
+    }
+
+    /// 更新を実行する。戻り値は**更新した件数** (単体指定なら 1 か 0)。
+    pub fn run(self) -> Result<usize> {
+        // 文字列 ID の対応表を壊されると get / delete が壊れるので触らせない
+        let touches_ext_id = self.set.contains_key(hamane_core::EXT_ID_META_KEY)
+            || self
+                .remove
+                .iter()
+                .any(|k| k == hamane_core::EXT_ID_META_KEY);
+        if touches_ext_id {
+            return Err(HamaneError::InvalidConfig(format!(
+                "{} is managed by the engine and cannot be updated",
+                hamane_core::EXT_ID_META_KEY
+            )));
+        }
+        if self.set.is_empty() && self.remove.is_empty() {
+            return Ok(0);
+        }
+
+        match &self.target {
+            UpdateTarget::One(id) => {
+                match self
+                    .collection
+                    .apply_meta_patch(id, &self.set, &self.remove)?
+                {
+                    Some(record) => {
+                        self.collection.upsert(record)?;
+                        Ok(1)
+                    }
+                    None => Ok(0),
+                }
+            }
+            UpdateTarget::Filter(filter) => {
+                const CHUNK: usize = 1_000;
+                let mut updated = 0;
+                // **カーソルで前へ進める**。毎回先頭から走査すると、更新後も
+                // フィルタに一致し続ける場合に同じレコードを延々と拾ってしまう
+                let mut after: Option<RecordId> = None;
+                loop {
+                    let mut scan = self.collection.scan().filter(filter.clone()).limit(CHUNK);
+                    if let Some(cursor) = after.clone() {
+                        scan = scan.after(cursor);
+                    }
+                    let page = scan.run()?;
+                    if page.is_empty() {
+                        return Ok(updated);
+                    }
+                    after = Some(page.last().expect("page is not empty").id.clone());
+
+                    let mut batch = Vec::with_capacity(page.len());
+                    for mut record in page {
+                        for key in &self.remove {
+                            record.metadata.remove(key);
+                        }
+                        for (key, value) in &self.set {
+                            record.metadata.insert(key.clone(), value.clone());
+                        }
+                        batch.push(record);
+                    }
+                    updated += batch.len();
+                    self.collection.upsert_batch(batch)?;
+                }
+            }
+        }
     }
 }
 
