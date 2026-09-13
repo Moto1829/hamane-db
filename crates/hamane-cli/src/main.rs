@@ -106,6 +106,24 @@ enum Command {
         #[arg(long)]
         filter: Option<String>,
     },
+    /// メタデータだけを更新する (todo 1701)。ベクトルは変わらない
+    UpdateMeta {
+        db: PathBuf,
+        collection: String,
+        /// 単体更新の対象 ID (--filter と排他)
+        #[arg(long, conflicts_with = "filter")]
+        id: Option<String>,
+        /// 一括更新の条件 (JSON。--id と排他)
+        #[arg(long)]
+        filter: Option<String>,
+        /// 設定する key=value (複数指定可)。値は JSON として解釈し、
+        /// 失敗したら文字列として扱う (例: --set year=2026 --set lang=ja)
+        #[arg(long = "set", value_name = "KEY=VALUE")]
+        sets: Vec<String>,
+        /// 削除するキー (複数指定可)
+        #[arg(long = "remove", value_name = "KEY")]
+        removes: Vec<String>,
+    },
     /// 条件に一致するレコードを一括削除する (todo 1602)
     Delete {
         db: PathBuf,
@@ -266,6 +284,34 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             };
             println!("{}", json!({"count": col.count(parsed.as_ref())?}));
         }
+        Command::UpdateMeta {
+            db,
+            collection,
+            id,
+            filter,
+            sets,
+            removes,
+        } => {
+            let db = Database::open(&db)?;
+            let col = db.collection(&collection)?;
+            let mut update = match (&id, &filter) {
+                (Some(id), None) => col.update_meta(parse_record_id(id)),
+                (None, Some(f)) => {
+                    col.update_meta_by_filter(&parse_filter(&serde_json::from_str(f)?)?)
+                }
+                _ => return Err("--id か --filter のどちらか一方を指定してください".into()),
+            };
+            for pair in &sets {
+                let (key, raw) = pair
+                    .split_once('=')
+                    .ok_or("--set は key=value の形で指定してください")?;
+                update = update.set(key, parse_meta_value(raw));
+            }
+            for key in &removes {
+                update = update.remove(key);
+            }
+            println!("{}", json!({"updated": update.run()?}));
+        }
         Command::Delete {
             db,
             collection,
@@ -361,6 +407,17 @@ fn json_to_meta(v: &Value) -> Result<MetaValue, Box<dyn std::error::Error>> {
             }
         }
         _ => Err("meta values must be string/number/bool".into()),
+    }
+}
+
+/// `--set key=value` の値。JSON として読めればその型、駄目なら文字列。
+fn parse_meta_value(raw: &str) -> hamane::MetaValue {
+    match serde_json::from_str::<Value>(raw) {
+        Ok(Value::Bool(b)) => hamane::MetaValue::Bool(b),
+        Ok(Value::Number(n)) if n.is_i64() => hamane::MetaValue::Int(n.as_i64().unwrap()),
+        Ok(Value::Number(n)) => hamane::MetaValue::Float(n.as_f64().unwrap()),
+        Ok(Value::String(s)) => hamane::MetaValue::Str(s),
+        _ => hamane::MetaValue::Str(raw.to_owned()),
     }
 }
 

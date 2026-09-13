@@ -338,6 +338,24 @@ E2E テストは単一プロセス・数千件が中心で、サンプルは性�
 - Rust / HTTP (`GET`・`DELETE /records`) / CLI (`scan` `count` `delete`) /
   Python (`scan` `count` `delete_by_filter` `delete_batch`) の全経路に露出
 
+## M17: メタデータ更新 API (2026-09-13 完了)
+
+| # | タスク | Depends |
+|---|---|---|
+| ✅ [1701](1701-metadata-update.md) | メタデータのみの更新 (単体 / 条件による一括) | 1601, 1602 |
+
+タグを 1 つ変えるのにベクトルごと `upsert` し直す必要があった。
+v0 は内部で upsert に落とす (WAL 量は変わらない)。メタデータ専用の WAL
+レコード型はフォーマット変更が要るので別タスク。
+
+要点:
+- 一括更新は**カーソルで前へ進める**。「更新後も条件に一致し続ける」場合に
+  毎回先頭から走査すると終わらないため (1602 の削除とはここが違う)
+- `_ext_id` の変更は拒否する (文字列 ID の解決が壊れる)
+- 実装中に **M16 の `ScanBuilder` が再エクスポートされていない**のを発見して修正
+- Rust / HTTP (PATCH ×2) / CLI (`update-meta`) / Python (`update_meta`,
+  `update_meta_by_filter`) に露出
+
 将来候補 (未タスク化): crates.io / PyPI 公開 (実装優先のため保留)、
 PQ4 の SIMD fast-scan
 (16 エントリ LUT のシャッフル評価。合成 LUT で 8bit 同等までは戻ったので、

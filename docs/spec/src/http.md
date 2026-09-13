@@ -35,6 +35,8 @@ TLS はスコープ外です (リバースプロキシの前提)。
 | POST | `/collections/{name}/records` | upsert (単体または配列) |
 | GET | `/collections/{name}/records` | 列挙 (`limit` / `after` / `filter`) |
 | DELETE | `/collections/{name}/records` | 条件による一括削除 |
+| PATCH | `/collections/{name}/records/{id}` | メタデータ更新 |
+| PATCH | `/collections/{name}/records` | 条件によるメタデータ一括更新 |
 | GET | `/collections/{name}/records/{id}` | 点参照 |
 | DELETE | `/collections/{name}/records/{id}` | 削除 |
 | POST | `/collections/{name}/search` | 近傍検索 |
@@ -133,6 +135,27 @@ curl -s -X DELETE -H "$AUTH" -H "$JSON" \
 ```
 
 `filter` は必須です (誤って全件消さないため)。一致 0 件でも 200 で `{"deleted":0}`。
+
+### メタデータの更新
+
+ベクトルはそのままに、メタデータだけを変えます。`set` はマージ (触れていない
+キーは残る)、`remove` は明示的な削除です。
+
+```bash
+curl -s -X PATCH -H "$AUTH" -H "$JSON" \
+  -d '{"set": {"lang": "en", "reviewed": true}, "remove": ["draft"]}' \
+  http://127.0.0.1:8080/collections/docs/records/1
+# {"updated":1}   (レコードが無ければ 404)
+
+# 条件による一括更新 (filter は必須)
+curl -s -X PATCH -H "$AUTH" -H "$JSON" -d '{
+  "filter": {"eq": ["tenant", "old"]},
+  "set": {"tenant": "new"}
+}' http://127.0.0.1:8080/collections/docs/records
+# {"updated":42}
+```
+
+`_ext_id` を含めると 400 になります (エンジンが管理しているため)。
 
 ### 点参照と削除
 

@@ -152,3 +152,27 @@ def test_scan_count_and_bulk_delete(tmp_path):
     # ID 指定の一括削除 (存在しないものは数えない)
     assert col.delete_batch([1, 2, 9999]) == 2
     assert len(col) == 38
+
+
+def test_update_meta(tmp_path):
+    """メタデータのみの更新 (todo 1701)。"""
+    db = hamane.Database(str(tmp_path / "db"))
+    col = db.create_collection("docs", dim=2, metric="l2")
+    for i in range(20):
+        col.upsert(i, [float(i), 0.0], meta={"lang": "ja", "draft": True})
+    db.flush()
+
+    # 単体: set はマージ、remove は削除、ベクトルは不変
+    assert col.update_meta(3, set={"tenant": "acme"}, remove=["draft"]) == 1
+    rec = col.get(3)
+    assert rec["vector"] == pytest.approx([3.0, 0.0])
+    assert rec["meta"]["tenant"] == "acme"
+    assert rec["meta"]["lang"] == "ja"
+    assert "draft" not in rec["meta"]
+
+    # 存在しない ID は 0
+    assert col.update_meta(9999, set={"a": 1}) == 0
+
+    # 一括
+    assert col.update_meta_by_filter({"eq": ["lang", "ja"]}, set={"reviewed": True}) == 20
+    assert col.count({"eq": ["reviewed", True]}) == 20
