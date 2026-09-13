@@ -273,3 +273,166 @@ fn batch_search_matches_individual_searches() {
     let bad = vec![vec![1.0, 0.0, 0.0], vec![1.0, 0.0]];
     assert!(col.search_batch(&bad).run().is_err());
 }
+
+/// レコードの列挙 (todo 1601): id 昇順・ページング・フィルタ・削除の反映。
+#[test]
+fn scan_lists_records_in_id_order() {
+    let db = Database::in_memory();
+    let col = db
+        .create_collection(
+            "docs",
+            CollectionConfig {
+                dim: 2,
+                metric: Metric::L2,
+            },
+        )
+        .unwrap();
+    for i in 0..50u64 {
+        col.upsert(
+            Record::new(i, vec![i as f32, 0.0])
+                .with_meta("even", i % 2 == 0)
+                .with_meta("lang", if i % 3 == 0 { "ja" } else { "en" }),
+        )
+        .unwrap();
+    }
+
+    // 全件が id 昇順で返る
+    let all = col.scan().run().unwrap();
+    assert_eq!(all.len(), 50);
+    let ids: Vec<u64> = all
+        .iter()
+        .map(|r| match &r.id {
+            hamane::RecordId::Num(n) => *n,
+            other => panic!("unexpected id {other:?}"),
+        })
+        .collect();
+    assert_eq!(ids, (0..50).collect::<Vec<u64>>());
+    // 内容も get と一致する
+    for rec in &all {
+        let got = col.get(rec.id.clone()).expect("get");
+        assert_eq!(got.vector, rec.vector);
+        assert_eq!(got.metadata, rec.metadata);
+    }
+
+    // ページング: 重複も取りこぼしも無い
+    let mut paged: Vec<u64> = Vec::new();
+    let mut cursor: Option<hamane::RecordId> = None;
+    loop {
+        let mut b = col.scan().limit(7);
+        if let Some(c) = cursor.clone() {
+            b = b.after(c);
+        }
+        let page = b.run().unwrap();
+        if page.is_empty() {
+            break;
+        }
+        assert!(page.len() <= 7);
+        cursor = Some(page.last().unwrap().id.clone());
+        paged.extend(page.iter().map(|r| match &r.id {
+            hamane::RecordId::Num(n) => *n,
+            other => panic!("unexpected id {other:?}"),
+        }));
+    }
+    assert_eq!(paged, ids);
+
+    // フィルタと count
+    let ja = col.scan().filter(Filter::eq("lang", "ja")).run().unwrap();
+    assert_eq!(ja.len(), 17, "0,3,..,48 の 17 件");
+    assert_eq!(col.count(Some(&Filter::eq("lang", "ja"))).unwrap(), 17);
+    assert_eq!(col.count(None).unwrap(), 50);
+
+    // 削除と上書きが反映される (フラッシュを跨いでも)
+    col.delete(0u64).unwrap();
+    col.upsert(Record::new(1u64, vec![99.0, 0.0])).unwrap();
+    col.flush().unwrap();
+    let after = col.scan().run().unwrap();
+    assert_eq!(after.len(), 49);
+    assert_eq!(after[0].vector, vec![99.0, 0.0], "id=1 が先頭で上書き済み");
+    assert_eq!(col.count(None).unwrap(), 49);
+}
+
+/// 文字列 ID でも列挙・カーソルが機能すること (todo 1601)。
+#[test]
+fn scan_handles_string_ids() {
+    let db = Database::in_memory();
+    let col = db
+        .create_collection(
+            "docs",
+            CollectionConfig {
+                dim: 2,
+                metric: Metric::L2,
+            },
+        )
+        .unwrap();
+    for i in 0..5u64 {
+        col.upsert(Record::new(format!("doc-{i}"), vec![i as f32, 0.0]))
+            .unwrap();
+    }
+    let all = col.scan().run().unwrap();
+    assert_eq!(all.len(), 5);
+    // 文字列 ID が復元されている
+    let names: Vec<String> = all
+        .iter()
+        .map(|r| match &r.id {
+            hamane::RecordId::Str(s) => s.clone(),
+            other => panic!("expected string id, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(names, vec!["doc-0", "doc-1", "doc-2", "doc-3", "doc-4"]);
+
+    // 文字列をカーソルにできる
+    let rest = col.scan().after("doc-2").run().unwrap();
+    assert_eq!(rest.len(), 2);
+}
+
+/// 条件による一括削除 (todo 1602)。
+#[test]
+fn delete_by_filter_removes_matching_records() {
+    let db = Database::in_memory();
+    let col = db
+        .create_collection(
+            "docs",
+            CollectionConfig {
+                dim: 2,
+                metric: Metric::L2,
+            },
+        )
+        .unwrap();
+    for i in 0..100u64 {
+        col.upsert(
+            Record::new(i, vec![i as f32, 0.0])
+                .with_meta("tenant", if i % 4 == 0 { "a" } else { "b" }),
+        )
+        .unwrap();
+    }
+    col.flush().unwrap();
+
+    let deleted = col.delete_by_filter(&Filter::eq("tenant", "a")).unwrap();
+    assert_eq!(deleted, 25, "0,4,..,96 の 25 件");
+    assert_eq!(col.len(), 75);
+    assert_eq!(col.count(Some(&Filter::eq("tenant", "a"))).unwrap(), 0);
+
+    // 消えたものはどの経路からも見えない
+    assert!(col.get(0u64).is_none());
+    for rec in col.scan().run().unwrap() {
+        assert_eq!(
+            rec.metadata.get("tenant"),
+            Some(&MetaValue::Str("b".into()))
+        );
+    }
+    let hits = col.search(&[0.0, 0.0]).k(5).run().unwrap();
+    for hit in &hits {
+        assert_ne!(hit.id % 4, 0, "削除済みが検索に出た: {}", hit.id);
+    }
+
+    // 一致 0 件はエラーにならず 0
+    assert_eq!(
+        col.delete_by_filter(&Filter::eq("tenant", "zzz")).unwrap(),
+        0
+    );
+
+    // delete_batch は実際に消えた件数を返す (存在しない ID は数えない)
+    let n = col.delete_batch(vec![1u64, 2, 999]).unwrap();
+    assert_eq!(n, 2);
+    assert_eq!(col.len(), 73);
+}

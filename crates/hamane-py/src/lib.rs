@@ -424,6 +424,75 @@ impl Collection {
         results.iter().map(|hits| hits_to_py(py, hits)).collect()
     }
 
+    /// レコードを id 昇順で列挙する (todo 1601)。
+    /// 結果は [{"id", "vector", "meta"}] のリスト。
+    /// `after` に前ページ最後の id を渡すとページングできる。
+    #[pyo3(signature = (limit=100, after=None, filter=None))]
+    fn scan(
+        &self,
+        py: Python<'_>,
+        limit: usize,
+        after: Option<&Bound<'_, PyAny>>,
+        filter: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Vec<Py<PyDict>>> {
+        let after = after.map(extract_record_id).transpose()?;
+        let filter = filter.map(extract_filter).transpose()?;
+        let col = Arc::clone(&self.inner);
+        let records = py
+            .allow_threads(move || {
+                let mut builder = col.scan().limit(limit);
+                if let Some(f) = filter {
+                    builder = builder.filter(f);
+                }
+                if let Some(a) = after {
+                    builder = builder.after(a);
+                }
+                builder.run()
+            })
+            .map_err(to_py_err)?;
+        records
+            .iter()
+            .map(|r| {
+                let d = PyDict::new(py);
+                match &r.id {
+                    engine::RecordId::Num(n) => d.set_item("id", n)?,
+                    engine::RecordId::Str(s) => d.set_item("id", s)?,
+                }
+                d.set_item("vector", r.vector.clone())?;
+                d.set_item("meta", meta_to_pydict(py, &r.metadata)?)?;
+                Ok(d.unbind())
+            })
+            .collect()
+    }
+
+    /// 条件に一致する件数 (todo 1601)。filter を省くと全件 (O(1))。
+    #[pyo3(signature = (filter=None))]
+    fn count(&self, py: Python<'_>, filter: Option<&Bound<'_, PyAny>>) -> PyResult<usize> {
+        let filter = filter.map(extract_filter).transpose()?;
+        let col = Arc::clone(&self.inner);
+        py.allow_threads(move || col.count(filter.as_ref()))
+            .map_err(to_py_err)
+    }
+
+    /// 条件に一致するレコードを一括削除する (todo 1602)。削除件数を返す。
+    fn delete_by_filter(&self, py: Python<'_>, filter: &Bound<'_, PyAny>) -> PyResult<usize> {
+        let filter = extract_filter(filter)?;
+        let col = Arc::clone(&self.inner);
+        py.allow_threads(move || col.delete_by_filter(&filter))
+            .map_err(to_py_err)
+    }
+
+    /// 複数 ID をまとめて削除する (todo 1602)。実際に消えた件数を返す。
+    fn delete_batch(&self, py: Python<'_>, ids: &Bound<'_, PyList>) -> PyResult<usize> {
+        let rids: Vec<engine::RecordId> = ids
+            .iter()
+            .map(|item| extract_record_id(&item))
+            .collect::<PyResult<_>>()?;
+        let col = Arc::clone(&self.inner);
+        py.allow_threads(move || col.delete_batch(rids))
+            .map_err(to_py_err)
+    }
+
     /// 点参照。見つからなければ None。
     fn get<'py>(
         &self,

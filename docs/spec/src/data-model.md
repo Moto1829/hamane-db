@@ -122,3 +122,31 @@ Filter::not(f)                           // 否定
   (`Filter::gt("year", 2025.5)` は `Int(2026)` に一致)
 - 数値以外の型への大小比較は不成立
 - `and([])` は全件成立、`or([])` は全件不成立
+
+## レコードの列挙と一括削除
+
+ID を知らなくても、条件を指定してレコードを取り出したり消したりできます
+(エクスポート、テナント単位の削除、デバッグなど)。
+
+```rust,ignore
+// id 昇順に列挙する。after で前ページの続きから
+let page = col.scan().limit(100).run()?;
+let next = col.scan().after(page.last().unwrap().id.clone()).limit(100).run()?;
+
+// 条件つき列挙とカウント
+let ja = col.scan().filter(Filter::eq("lang", "ja")).run()?;
+let n = col.count(Some(&Filter::eq("lang", "ja")))?;
+
+// 条件による一括削除 (削除件数が返る)
+let deleted = col.delete_by_filter(&Filter::eq("tenant", "acme"))?;
+// ID を指定してまとめて削除する場合
+let deleted = col.delete_batch(vec![1u64, 2, 3])?;
+```
+
+- **順序は内部 id の昇順**で決定的です。`after` にひとつ前のページの最後の ID を
+  渡すとページングでき、重複も取りこぼしも起きません
+- 見えるのは live なレコードだけです (削除済み・上書きされた古い版は出ません)
+- `limit` を指定すると、各ソース (memtable / セグメント) を id 順にマージしながら
+  **必要な件数に達した時点で打ち切ります** (全件は走査しません)
+- `count(None)` は O(1) (`len()` と同じ)。フィルタありは全件走査です
+- 一括削除は WAL の fsync を 1 回にまとめます (1 件ずつ `delete` を呼ぶより速い)
