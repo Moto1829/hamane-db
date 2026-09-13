@@ -275,6 +275,27 @@ impl Collection {
         }
     }
 
+    /// メタデータだけを WAL に書く (todo 1901)。内部 ID に解決して store へ。
+    fn write_metadata(&self, id: &RecordId, metadata: Metadata) -> Result<usize> {
+        self.write_metadata_batch(vec![(id.clone(), metadata)])
+    }
+
+    /// 複数レコードのメタデータを 1 回の WAL sync で書く (todo 1901)。
+    fn write_metadata_batch(&self, updates: Vec<(RecordId, Metadata)>) -> Result<usize> {
+        let mut resolved = Vec::with_capacity(updates.len());
+        for (rid, metadata) in updates {
+            let internal = match &rid {
+                RecordId::Num(n) => Some(*n),
+                RecordId::Str(s) => self.store.resolve_ext_id(self.collection_id, s)?,
+            };
+            if let Some(id) = internal {
+                resolved.push((id, metadata));
+            }
+        }
+        self.store
+            .update_metadata_batch(self.collection_id, resolved)
+    }
+
     /// パッチを 1 レコードに適用して upsert する。更新できたら true。
     fn apply_meta_patch(
         &self,
@@ -1061,10 +1082,9 @@ impl MetaUpdate<'_> {
                     .collection
                     .apply_meta_patch(id, &self.set, &self.remove)?
                 {
-                    Some(record) => {
-                        self.collection.upsert(record)?;
-                        Ok(1)
-                    }
+                    // メタデータ専用の WAL レコードで書く (todo 1901)。
+                    // ベクトルは WAL に載らないので書き込み量が dim に依存しない
+                    Some(record) => self.collection.write_metadata(&record.id, record.metadata),
                     None => Ok(0),
                 }
             }
@@ -1093,10 +1113,9 @@ impl MetaUpdate<'_> {
                         for (key, value) in &self.set {
                             record.metadata.insert(key.clone(), value.clone());
                         }
-                        batch.push(record);
+                        batch.push((record.id, record.metadata));
                     }
-                    updated += batch.len();
-                    self.collection.upsert_batch(batch)?;
+                    updated += self.collection.write_metadata_batch(batch)?;
                 }
             }
         }

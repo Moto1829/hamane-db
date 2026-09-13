@@ -280,3 +280,168 @@ fn swap_collections_switches_implementations() {
         assert_eq!(db.collection("docs").unwrap().len(), 20);
     }
 }
+
+/// メタデータ更新の WAL 量が**次元に依存しない** (todo 1901)。
+///
+/// 1701 の実装は内部で upsert に落としていたので、dim を上げると WAL の
+/// 増分もベクトルぶん増えていた。専用レコードにして増分をほぼ一定にする。
+#[test]
+fn metadata_update_wal_size_is_independent_of_dim() {
+    fn wal_bytes(dir: &std::path::Path) -> u64 {
+        let mut total = 0;
+        let wal_dir = dir.join("wal");
+        if let Ok(entries) = std::fs::read_dir(&wal_dir) {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    total += meta.len();
+                }
+            }
+        }
+        total
+    }
+
+    let mut growth = Vec::new();
+    for dim in [8usize, 512] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let col = db
+            .create_collection("docs", config(dim, Metric::L2))
+            .unwrap();
+        for i in 0..100u64 {
+            col.upsert(Record::new(i, vec![i as f32; dim]).with_meta("tenant", "a"))
+                .unwrap();
+        }
+        // フラッシュして WAL を切り替え、ここからの増分だけを測る
+        col.flush().unwrap();
+        let before = wal_bytes(dir.path());
+
+        let updated = col
+            .update_meta_by_filter(&Filter::eq("tenant", "a"))
+            .set("reviewed", true)
+            .run()
+            .unwrap();
+        assert_eq!(updated, 100);
+
+        let delta = wal_bytes(dir.path()) - before;
+        eprintln!("dim={dim}: WAL 増分 {delta} バイト");
+        growth.push(delta);
+    }
+
+    // dim が 64 倍になっても WAL 増分はほぼ変わらない (ベクトルを載せないため)
+    let (small, large) = (growth[0], growth[1]);
+    assert!(
+        large < small * 2,
+        "dim=512 の WAL 増分 {large} が dim=8 の {small} に比べて増えすぎ"
+    );
+
+    // 同じ更新を upsert (旧実装の経路) でやった場合と比べる。
+    // こちらはベクトルが WAL に載るので dim に比例する
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(dir.path()).unwrap();
+    let col = db
+        .create_collection("docs", config(512, Metric::L2))
+        .unwrap();
+    for i in 0..100u64 {
+        col.upsert(Record::new(i, vec![i as f32; 512]).with_meta("tenant", "a"))
+            .unwrap();
+    }
+    col.flush().unwrap();
+    let before = wal_bytes(dir.path());
+    for i in 0..100u64 {
+        // 旧実装と同じこと: ベクトルごと書き直す
+        col.upsert(
+            Record::new(i, vec![i as f32; 512])
+                .with_meta("tenant", "a")
+                .with_meta("reviewed", true),
+        )
+        .unwrap();
+    }
+    let via_upsert = wal_bytes(dir.path()) - before;
+    eprintln!("dim=512: upsert 経由の WAL 増分 {via_upsert} バイト (メタデータ専用は {large})");
+    assert!(
+        large * 10 < via_upsert,
+        "メタデータ専用レコードの効果が出ていない: {large} vs {via_upsert}"
+    );
+}
+
+/// メタデータ更新が WAL リプレイで復元されること (todo 1901)。
+/// セグメント上のレコードへの更新も含む。
+#[test]
+fn metadata_update_survives_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = Database::open(dir.path()).unwrap();
+        let col = db.create_collection("docs", config(2, Metric::L2)).unwrap();
+        for i in 0..20u64 {
+            col.upsert(
+                Record::new(i, vec![i as f32, 0.0])
+                    .with_meta("tenant", "a")
+                    .with_meta("draft", true),
+            )
+            .unwrap();
+        }
+        // セグメントに落としてから更新する (memtable に無い行を更新する経路)
+        col.flush().unwrap();
+        col.update_meta(3u64)
+            .set("tenant", "b")
+            .remove("draft")
+            .run()
+            .unwrap();
+        col.update_meta_by_filter(&Filter::eq("tenant", "a"))
+            .set("reviewed", true)
+            .run()
+            .unwrap();
+        // 削除済みレコードへの更新は復活させない
+        col.delete(7u64).unwrap();
+        assert_eq!(col.update_meta(7u64).set("x", 1i64).run().unwrap(), 0);
+    }
+
+    // WAL リプレイ (フラッシュしていないので UpdateMeta が WAL に残っている)
+    let db = Database::open(dir.path()).unwrap();
+    let col = db.collection("docs").unwrap();
+    let rec = col.get(3u64).unwrap();
+    assert_eq!(rec.vector, vec![3.0, 0.0], "ベクトルは保たれる");
+    assert_eq!(
+        rec.metadata.get("tenant"),
+        Some(&hamane::MetaValue::Str("b".into()))
+    );
+    assert!(!rec.metadata.contains_key("draft"));
+    assert!(
+        !rec.metadata.contains_key("reviewed"),
+        "tenant=b なので対象外"
+    );
+
+    // 一括更新も復元される (id=3 と削除済みの 7 を除く 18 件)
+    assert_eq!(
+        col.count(Some(&Filter::eq("reviewed", hamane::MetaValue::Bool(true))))
+            .unwrap(),
+        18
+    );
+    assert!(col.get(7u64).is_none(), "削除済みが復活していない");
+    assert_eq!(col.len(), 19);
+}
+
+/// 文字列 ID のレコードでもメタデータ更新が壊れないこと (todo 1901)。
+#[test]
+fn metadata_update_preserves_string_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = Database::open(dir.path()).unwrap();
+        let col = db.create_collection("docs", config(2, Metric::L2)).unwrap();
+        col.upsert(Record::new("doc-a", vec![1.0, 0.0]).with_meta("lang", "ja"))
+            .unwrap();
+        col.flush().unwrap();
+        assert_eq!(col.update_meta("doc-a").set("lang", "en").run().unwrap(), 1);
+    }
+    let db = Database::open(dir.path()).unwrap();
+    let col = db.collection("docs").unwrap();
+    // 文字列 ID で引ける = _ext_id が保たれている
+    let rec = col.get("doc-a").expect("string id still resolves");
+    assert_eq!(
+        rec.metadata.get("lang"),
+        Some(&hamane::MetaValue::Str("en".into()))
+    );
+    let listed = col.scan().run().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(matches!(&listed[0].id, hamane::RecordId::Str(s) if s == "doc-a"));
+}

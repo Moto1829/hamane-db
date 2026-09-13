@@ -23,6 +23,8 @@ const TYPE_DROP_COLLECTION: u8 = 4;
 const TYPE_RENAME_COLLECTION: u8 = 5;
 /// 2 つの collection 名を原子的に入れ替える (todo 1801)
 const TYPE_SWAP_COLLECTION_NAMES: u8 = 6;
+/// メタデータだけの更新 (todo 1901)。ベクトルを載せないので dim に依存しない
+const TYPE_UPDATE_META: u8 = 7;
 
 /// WAL に記録される操作。vector は検証・正規化済みであること。
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +60,15 @@ pub enum WalRecord {
     SwapCollectionNames {
         a: u32,
         b: u32,
+    },
+    /// メタデータだけを差し替える (todo 1901)。
+    ///
+    /// 差分ではなく**マージ後の最終的なメタデータ**を載せる
+    /// (リプレイが適用順に依存せず冪等になる)。ベクトルは現在の値を保つ。
+    UpdateMeta {
+        collection_id: u32,
+        id: Id,
+        metadata: Metadata,
     },
 }
 
@@ -112,6 +123,16 @@ impl WalRecord {
                 format::put_u32(&mut body, *a);
                 format::put_u32(&mut body, *b);
             }
+            WalRecord::UpdateMeta {
+                collection_id,
+                id,
+                metadata,
+            } => {
+                format::put_u8(&mut body, TYPE_UPDATE_META);
+                format::put_u32(&mut body, *collection_id);
+                format::put_u64(&mut body, *id);
+                put_metadata(&mut body, metadata);
+            }
         }
         body
     }
@@ -152,6 +173,11 @@ impl WalRecord {
             TYPE_SWAP_COLLECTION_NAMES => WalRecord::SwapCollectionNames {
                 a: r.u32()?,
                 b: r.u32()?,
+            },
+            TYPE_UPDATE_META => WalRecord::UpdateMeta {
+                collection_id: r.u32()?,
+                id: r.u64()?,
+                metadata: read_metadata(&mut r)?,
             },
             t => return Err(corrupted(format!("unknown WAL record type: {t}"))),
         };
