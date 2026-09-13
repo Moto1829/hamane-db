@@ -1011,6 +1011,55 @@ impl Store {
         Ok(existed)
     }
 
+    /// 複数 ID を 1 回の WAL sync でまとめて削除する (todo 1602)。
+    /// 戻り値は**実際に live だった件数** (存在しなかった ID は数えない)。
+    ///
+    /// `upsert_batch` と対称。1 件ずつ `delete` を呼ぶと WAL の sync が件数ぶん
+    /// 走るので、大量削除ではこちらを使う。
+    pub fn delete_batch(&self, collection_id: u32, ids: &[Id]) -> Result<usize> {
+        self.ensure_writable()?;
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let (deleted, token) = {
+            let mut state = self.shared.state.lock().expect("lock poisoned");
+            Self::check_collection(&state, collection_id)?;
+            let mut deleted = 0usize;
+            if let Some((_, wal)) = state.wal.as_mut() {
+                for id in ids {
+                    wal.append(&WalRecord::Delete {
+                        collection_id,
+                        id: *id,
+                    })?;
+                }
+            }
+            // sync は 1 回だけ。WAL に載せてから memtable に反映する順は
+            // 単発の delete と同じ (log_and_apply と同じ順序)
+            let token = match state.wal.as_mut() {
+                Some((_, wal)) => wal.sync()?,
+                None => None,
+            };
+            for id in ids {
+                if state.is_id_live(collection_id, *id) {
+                    deleted += 1;
+                }
+                Self::apply_record(
+                    &mut state,
+                    WalRecord::Delete {
+                        collection_id,
+                        id: *id,
+                    },
+                )?;
+            }
+            self.maybe_flush(state)?;
+            (deleted, token)
+        };
+        if let Some(t) = token {
+            t.wait()?;
+        }
+        Ok(deleted)
+    }
+
     fn check_collection(state: &StoreState, collection_id: u32) -> Result<()> {
         if !state.collections.contains_key(&collection_id) {
             return Err(HamaneError::CollectionNotFound(format!(

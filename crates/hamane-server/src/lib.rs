@@ -7,6 +7,8 @@
 //! | DELETE | /collections/{name} | 削除 |
 //! | GET | /collections/{name} | 情報 (件数・セグメント構成) |
 //! | POST | /collections/{name}/records | upsert (単発 or 配列) |
+//! | GET | /collections/{name}/records | 列挙 (limit / after / filter) |
+//! | DELETE | /collections/{name}/records | 条件による一括削除 (filter) |
 //! | GET | /collections/{name}/records/{id} | 点参照 |
 //! | DELETE | /collections/{name}/records/{id} | レコード削除 |
 //! | POST | /collections/{name}/search | 検索 (vector, k, ef, nprobe, threshold, filter) |
@@ -63,7 +65,12 @@ pub fn router_with_auth(db: Arc<Database>, api_key: Option<String>) -> Router {
                 .get(collection_info)
                 .delete(drop_collection),
         )
-        .route("/collections/{name}/records", post(upsert_records))
+        .route(
+            "/collections/{name}/records",
+            post(upsert_records)
+                .get(scan_records)
+                .delete(delete_records),
+        )
         .route(
             "/collections/{name}/records/{id}",
             get(get_record).delete(delete_record),
@@ -274,6 +281,14 @@ fn parse_record_id(v: &Value) -> Result<RecordId, ApiError> {
 }
 
 /// パスパラメータ → RecordId。数値に見えれば Num、そうでなければ Str。
+/// RecordId を JSON に (u64 は数値、文字列 ID は文字列)。
+fn id_to_json(id: &RecordId) -> Value {
+    match id {
+        RecordId::Num(n) => json!(n),
+        RecordId::Str(s) => json!(s),
+    }
+}
+
 fn record_id_from_path(s: &str) -> RecordId {
     match s.parse::<u64>() {
         Ok(n) => RecordId::Num(n),
@@ -572,6 +587,86 @@ async fn search_batch(
             })
             .collect();
         Ok(Json(json!({ "results": results })))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct ScanQuery {
+    /// 返す件数の上限 (既定 100)
+    #[serde(default = "default_scan_limit")]
+    limit: usize,
+    /// このレコードの**次**から返す (前ページの最後の id)
+    after: Option<String>,
+    /// メタデータ条件 (JSON をそのままクエリ文字列に載せる)
+    filter: Option<String>,
+}
+
+fn default_scan_limit() -> usize {
+    100
+}
+
+fn parse_filter_str(raw: &str) -> Result<Filter, ApiError> {
+    let value: Value = serde_json::from_str(raw)
+        .map_err(|e| bad_request(format!("filter is not valid JSON: {e}")))?;
+    parse_filter(&value)
+}
+
+/// レコードの列挙 (todo 1601)。id 昇順。`after` でページングする。
+async fn scan_records(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<ScanQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let filter = q.filter.as_deref().map(parse_filter_str).transpose()?;
+    let db = Arc::clone(&state.db);
+    blocking(move || {
+        let col = db.collection(&name)?;
+        let mut builder = col.scan().limit(q.limit);
+        if let Some(f) = filter {
+            builder = builder.filter(f);
+        }
+        if let Some(after) = q.after {
+            builder = builder.after(record_id_from_path(&after));
+        }
+        let records = builder.run()?;
+        let next = records.last().map(|r| id_to_json(&r.id));
+        let items: Vec<Value> = records
+            .iter()
+            .map(|r| {
+                json!({
+                    "id": id_to_json(&r.id),
+                    "vector": r.vector,
+                    "meta": meta_to_json(&r.metadata),
+                })
+            })
+            .collect();
+        // next は「次ページの after に渡す値」。件数が limit 未満なら終端
+        Ok(Json(json!({
+            "records": items,
+            "next": if items.len() < q.limit { Value::Null } else { next.unwrap_or(Value::Null) },
+        })))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct DeleteByFilterBody {
+    filter: Value,
+}
+
+/// 条件による一括削除 (todo 1602)。削除件数を返す。
+async fn delete_records(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<DeleteByFilterBody>,
+) -> Result<Json<Value>, ApiError> {
+    let filter = parse_filter(&body.filter)?;
+    let db = Arc::clone(&state.db);
+    blocking(move || {
+        let col = db.collection(&name)?;
+        let deleted = col.delete_by_filter(&filter)?;
+        Ok(Json(json!({ "deleted": deleted })))
     })
     .await
 }

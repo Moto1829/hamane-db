@@ -417,3 +417,83 @@ async fn batch_search_and_threshold() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+/// レコードの列挙と一括削除 (todos 1601, 1602) の HTTP 露出。
+#[tokio::test]
+async fn scan_and_delete_by_filter() {
+    let app = test_app();
+    request(
+        &app,
+        "PUT",
+        "/collections/docs",
+        Some(json!({"dim": 2, "metric": "l2"})),
+    )
+    .await;
+    let records: Vec<Value> = (0..30u64)
+        .map(|i| json!({"id": i, "vector": [i as f32, 0.0], "meta": {"even": i % 2 == 0}}))
+        .collect();
+    request(
+        &app,
+        "POST",
+        "/collections/docs/records",
+        Some(Value::Array(records)),
+    )
+    .await;
+
+    // 列挙 (id 昇順・limit・next)
+    let (status, value) = request(&app, "GET", "/collections/docs/records?limit=5", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let ids: Vec<u64> = value["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_u64().unwrap())
+        .collect();
+    assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+    assert_eq!(value["next"].as_u64(), Some(4));
+
+    // カーソルで続き
+    let (_, value) = request(
+        &app,
+        "GET",
+        "/collections/docs/records?limit=5&after=4",
+        None,
+    )
+    .await;
+    let ids: Vec<u64> = value["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_u64().unwrap())
+        .collect();
+    assert_eq!(ids, vec![5, 6, 7, 8, 9]);
+
+    // 終端では next が null
+    let (_, value) = request(&app, "GET", "/collections/docs/records?limit=100", None).await;
+    assert_eq!(value["records"].as_array().unwrap().len(), 30);
+    assert!(value["next"].is_null());
+
+    // フィルタつき列挙
+    let (_, value) = request(
+        &app,
+        "GET",
+        "/collections/docs/records?limit=100&filter=%7B%22eq%22%3A%5B%22even%22%2Ctrue%5D%7D",
+        None,
+    )
+    .await;
+    assert_eq!(value["records"].as_array().unwrap().len(), 15);
+
+    // 一括削除
+    let (status, value) = request(
+        &app,
+        "DELETE",
+        "/collections/docs/records",
+        Some(json!({"filter": {"eq": ["even", true]}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(value["deleted"].as_u64(), Some(15));
+
+    let (_, info) = request(&app, "GET", "/collections/docs", None).await;
+    assert_eq!(info["len"].as_u64(), Some(15));
+}

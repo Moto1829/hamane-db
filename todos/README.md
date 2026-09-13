@@ -318,21 +318,25 @@ E2E テストは単一プロセス・数千件が中心で、サンプルは性�
   (キーが距離の二乗なので符号が消える → 必ず 0 件が正しい)
 - HTTP (`/search/batch`)・CLI (`--threshold`)・Python (`search_batch`) に露出
 
-## M16: レコードの列挙と一括削除 (2026-09-13 計画)
+## M16: レコードの列挙と一括削除 (2026-09-13 完了)
 
 運用で必要になる**データ操作の穴**を埋める。現状レコードを取り出す手段は
 `get(id)` と近傍検索だけで全件列挙ができず、削除も ID 指定の 1 件ずつしかない。
 
 | # | タスク | Depends |
 |---|---|---|
-| ⬜ [1601](1601-scan-and-count.md) | レコードの列挙とカウント (scan / count) | 209 |
-| ⬜ [1602](1602-bulk-delete.md) | 条件による一括削除 | 1601 |
+| ✅ [1601](1601-scan-and-count.md) | レコードの列挙とカウント (scan / count) | 209 |
+| ✅ [1602](1602-bulk-delete.md) | 条件による一括削除 | 1601 |
 
 要点:
 - `scan` は **id 昇順**で返し、`after` カーソルでページングできるようにする。
   各ソースが既に id 昇順なので k-way マージで `limit` に達したら打ち切る
 - `delete_by_filter` は 1601 の走査で ID を集めて `delete_batch` に流す。
   WAL の sync を 1 回にまとめる (`upsert_batch` と対称)
+- newest-wins と tombstone の解決は `LiveView::get` に任せ、マージ側は
+  id の重複を 1 回にまとめるだけにした
+- Rust / HTTP (`GET`・`DELETE /records`) / CLI (`scan` `count` `delete`) /
+  Python (`scan` `count` `delete_by_filter` `delete_batch`) の全経路に露出
 
 将来候補 (未タスク化): crates.io / PyPI 公開 (実装優先のため保留)、
 PQ4 の SIMD fast-scan
