@@ -243,6 +243,40 @@ struct StoreState {
 }
 
 impl StoreState {
+    /// id の現在のレコードを解決する (active → pending → セグメント降順)。
+    /// tombstone があればそこで打ち切って None (todo 1901)。
+    fn current_record(&self, cid: u32, id: Id) -> Option<StoredRecord> {
+        let col = self.collections.get(&cid)?;
+        if col.memtable.is_deleted(id) {
+            return None;
+        }
+        if let Some(rec) = col.memtable.get(id) {
+            return Some(rec.clone());
+        }
+        if let Some(pending) = &self.pending_flush {
+            if let Some(mt) = pending.memtables.get(&cid) {
+                if mt.is_deleted(id) {
+                    return None;
+                }
+                if let Some(rec) = mt.get(id) {
+                    return Some(rec.clone());
+                }
+            }
+        }
+        for seg in &col.segments {
+            if seg.is_tombstoned(id) {
+                return None;
+            }
+            if let Some(row) = seg.row_of(id) {
+                return Some(StoredRecord {
+                    vector: seg.vector(row).to_vec(),
+                    metadata: seg.metadata(row).ok()?,
+                });
+            }
+        }
+        None
+    }
+
     /// id が現在 live か (active → pending → セグメント降順の優先解決)。
     fn is_id_live(&self, cid: u32, id: Id) -> bool {
         let col = &self.collections[&cid];
@@ -755,6 +789,33 @@ impl Store {
                     state.names.remove(&col.name);
                 }
             }
+            WalRecord::UpdateMeta {
+                collection_id,
+                id,
+                metadata,
+            } => {
+                if !state.collections.contains_key(&collection_id) {
+                    return Err(corrupted("WAL update_meta for unknown collection"));
+                }
+                // 対象が既に消えていれば何もしない (削除との競合。復活させない)
+                let Some(current) = state.current_record(collection_id, id) else {
+                    return Ok(());
+                };
+                let was_live = state.is_id_live(collection_id, id);
+                let col = state.collections.get_mut(&collection_id).unwrap();
+                if !was_live {
+                    col.live_len += 1;
+                }
+                col.track_ext_id(id, &metadata);
+                // ベクトルは現在の値をそのまま使う (WAL には載っていない)
+                col.memtable.upsert(
+                    id,
+                    StoredRecord {
+                        vector: current.vector,
+                        metadata,
+                    },
+                );
+            }
             WalRecord::RenameCollection {
                 collection_id,
                 new_name,
@@ -1031,6 +1092,75 @@ impl Store {
             t.wait()?;
         }
         Ok(existed)
+    }
+
+    /// メタデータだけを差し替える (todo 1901)。対象が無ければ false。
+    ///
+    /// WAL にはベクトルを載せないので、書き込み量が次元に依存しない。
+    /// ただし memtable にはベクトルごと載る (セグメント上の行を上書きするため)。
+    pub fn update_metadata(
+        &self,
+        collection_id: u32,
+        id: Id,
+        metadata: hamane_core::Metadata,
+    ) -> Result<bool> {
+        Ok(self.update_metadata_batch(collection_id, vec![(id, metadata)])? == 1)
+    }
+
+    /// 複数レコードのメタデータを 1 回の WAL sync で差し替える (todo 1901)。
+    /// 戻り値は実際に更新した件数 (対象が無かったものは数えない)。
+    pub fn update_metadata_batch(
+        &self,
+        collection_id: u32,
+        updates: Vec<(Id, hamane_core::Metadata)>,
+    ) -> Result<usize> {
+        self.ensure_writable()?;
+        if updates.is_empty() {
+            return Ok(0);
+        }
+        let (updated, token) = {
+            let mut state = self.shared.state.lock().expect("lock poisoned");
+            Self::check_collection(&state, collection_id)?;
+            // 対象が存在するものだけ WAL に載せる (存在しない ID を書いても
+            // リプレイで無視されるだけだが、WAL を無駄に太らせない)
+            let targets: Vec<(Id, hamane_core::Metadata)> = updates
+                .into_iter()
+                .filter(|(id, _)| state.current_record(collection_id, *id).is_some())
+                .collect();
+            if targets.is_empty() {
+                return Ok(0);
+            }
+            if let Some((_, wal)) = state.wal.as_mut() {
+                for (id, metadata) in &targets {
+                    wal.append(&WalRecord::UpdateMeta {
+                        collection_id,
+                        id: *id,
+                        metadata: metadata.clone(),
+                    })?;
+                }
+            }
+            let token = match state.wal.as_mut() {
+                Some((_, wal)) => wal.sync()?,
+                None => None,
+            };
+            let updated = targets.len();
+            for (id, metadata) in targets {
+                Self::apply_record(
+                    &mut state,
+                    WalRecord::UpdateMeta {
+                        collection_id,
+                        id,
+                        metadata,
+                    },
+                )?;
+            }
+            self.maybe_flush(state)?;
+            (updated, token)
+        };
+        if let Some(t) = token {
+            t.wait()?;
+        }
+        Ok(updated)
     }
 
     /// collection を改名する (todo 1801)。

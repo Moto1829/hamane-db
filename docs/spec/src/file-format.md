@@ -46,10 +46,17 @@ body = type: u8 + payload
 | 4 | DropCollection | collection_id u32 |
 | 5 | RenameCollection | collection_id u32, new_name string |
 | 6 | SwapCollectionNames | a u32, b u32 |
+| 7 | UpdateMeta | collection_id u32, id u64, metadata |
 
 metric: 0 = L2, 1 = Cosine, 2 = Dot。
 
-型 5・6 は M18 で追加しました。新しいバイナリは古い WAL をそのまま読めます
+型 7 (`UpdateMeta`) は**メタデータだけ**を載せます。ベクトルは現在の値を
+そのまま保つので、書き込み量が次元に依存しません
+(dim=512・100 件の更新で 210 KB → 5.5 KB)。差分ではなく**マージ後の最終的な
+メタデータ**を載せるため、リプレイは適用順に依存せず冪等です。
+対象のレコードが存在しない (削除済み) 場合、リプレイは何もしません。
+
+型 5・6 は M18、型 7 は M19 で追加しました。新しいバイナリは古い WAL をそのまま読めます
 (既存の型の意味は変えていません)。古いバイナリで新しい WAL を読むことは
 想定していません (ダウングレードは元から保証範囲外)。
 
