@@ -370,6 +370,16 @@ WAL にタグ 5・6 を追加 (既存タグの意味は不変なので、新し�
 古い WAL を読める)。Rust / HTTP (`/rename`, `/admin/collections/swap`) /
 CLI (`rename`, `swap`) / Python に露出。
 
+## M19: メタデータ専用の WAL レコード (2026-09-13 計画)
+
+| # | タスク | Depends |
+|---|---|---|
+| ⬜ [1901](1901-wal-update-meta.md) | メタデータ更新の WAL 量を次元非依存にする | 1701, 1801 |
+
+1701 の `update_meta` は内部で upsert に落としているので、WAL にレコード全体
+(dim=768 なら約 3 KB) が載る。メタデータだけなら数十バイトで済む。
+WAL は fsync を伴う直列パスなので一括更新のスループットに直結する。
+
 将来候補 (未タスク化): crates.io / PyPI 公開 (実装優先のため保留)、
 PQ4 の SIMD fast-scan
 (16 エントリ LUT のシャッフル評価。合成 LUT で 8bit 同等までは戻ったので、
