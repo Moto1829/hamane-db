@@ -5,6 +5,7 @@
 # 利用ガイド
 
 - [導入とクイックスタート](getting-started.md)
+- [用語集](glossary.md)
 - [データモデル](data-model.md)
 - [検索](search.md)
 - [永続化と耐久性](persistence.md)

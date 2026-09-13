@@ -26,15 +26,16 @@ pub struct SearchHit {
 
 ## 実行モデル
 
-検索はスナップショット上で実行されます。開始時点の memtable と
-セグメント集合が対象になり、検索中の書き込み・フラッシュ・コンパクションの
+検索は[スナップショット](glossary.md#スナップショット)上で実行されます。
+開始時点の [memtable](glossary.md#memtable) と
+[セグメント](glossary.md#セグメント-segment)集合が対象になり、検索中の書き込み・フラッシュ・コンパクションの
 影響を受けません (ブロックもしません)。
 
 データソースごとの実行方式:
 
 | ソース | 方式 | 正確性 |
 |---|---|---|
-| memtable (未フラッシュ分) | Flat (全走査) | 正確 |
+| memtable (未フラッシュ分) | [Flat](glossary.md#近似最近傍-ann-と正確な検索) (全走査) | 正確 |
 | セグメント (HNSW なし = 小規模) | Flat | 正確 |
 | セグメント (HNSW あり) | HNSW | **近似** |
 
@@ -44,14 +45,16 @@ pub struct SearchHit {
 
 - **削除済み・上書き済みレコードは決して結果に現れない**。
   複数セグメントにまたがる同一 id は、最も新しい書き込みだけが有効
-  (newest-wins)。この判定は走査時に行われるため、Flat 経路では
+  ([newest-wins](glossary.md#newest-wins))。この判定は走査時に行われるため、Flat 経路では
   古い値が新しい値を押し出すこともない
 - 挿入・削除は**即座に**検索へ反映される (インデックス構築を待たない)
 - 同距離のタイは id 昇順で決定的に順序づけられる (Flat 経路)
 
 ## 近似性 (HNSW) について
 
-HNSW を持つセグメントに対する検索は近似です。再現率は `ef` で制御します:
+[HNSW](glossary.md#hnsw) を持つセグメントに対する検索は近似です。
+[再現率 (recall)](glossary.md#recallk-再現率) は
+[`ef`](glossary.md#ef--ef_search--ef_construction) で制御します:
 
 - `ef` は「探索中に保持する候補数」。大きいほど再現率が上がり遅くなる。
   実効値は `max(ef, k)`
@@ -79,7 +82,8 @@ memtable は常に正確検索されます。
 
 ## 量子化による高速化
 
-`StoreOptions.quantization` で有効化します (既定 `None`)。フラッシュ時に
+[量子化](glossary.md#量子化-quantization)は `StoreOptions.quantization` で
+有効化します (既定 `None`)。フラッシュ時に
 量子化したベクトルを別ファイルにも書き、HNSW 探索 1 段目の距離計算を
 軽い演算に置き換えます。**元の `vectors.bin` は必ず残る**ので、量子化の
 有無にかかわらず最終結果は f32 の正確な距離で再ランクされます。
@@ -90,7 +94,8 @@ memtable は常に正確検索されます。
 | PQ | `Some(Quantization::Pq { m })` | `ceil(m × pq_nbits / 8)` バイト (dim=128, m=32, 8bit で 1/16) | LUT の表引き加算 (ADC) |
 
 - 探索は量子化距離で上位 k×4 件 (4-bit PQ は k×8 件) を取り、f32 の正確な距離で
-  再ランクして上位 k を返す (2 段階検索)。**返される score は常に正確な f32 距離**
+  [再ランク](glossary.md#2-段階検索-と-再ランク-rerank)して上位 k を返す
+  (2 段階検索)。**返される score は常に正確な f32 距離**
 - SQ8 の量子化は全次元共通の min/max (グローバルスケール)
 - PQ は dim を m 本のサブベクトルに分け、サブベクトルごとに 256 個の
   セントロイド (コードブック) を学習します。コードブックはセグメント構築時に
@@ -125,7 +130,7 @@ memtable は常に正確検索されます。
 ## IVF による枝刈り
 
 `StoreOptions.index` を `Ivf` / `IvfPq` にすると、HNSW グラフの代わりに
-転置ファイル (粗クラスタ) を構築します。HNSW と IVF はセグメント単位で
+[転置ファイル (IVF)](glossary.md#ivf-転置ファイル) を構築します。HNSW と IVF はセグメント単位で
 排他です。
 
 - 構築時に粗 k-means で `nlist ≈ √count` 個のクラスタを作り、各行を
