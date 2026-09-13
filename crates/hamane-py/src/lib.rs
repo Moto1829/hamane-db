@@ -244,6 +244,21 @@ impl Database {
     }
 
     /// Collection を削除する。
+    /// collection を改名する (todo 1801)。
+    fn rename_collection(&self, py: Python<'_>, from: &str, to: &str) -> PyResult<()> {
+        let (db, from, to) = (Arc::clone(&self.inner), from.to_owned(), to.to_owned());
+        py.allow_threads(move || db.rename_collection(&from, &to))
+            .map_err(to_py_err)
+    }
+
+    /// 2 つの collection 名を原子的に入れ替える (todo 1801)。
+    /// 索引を作り直したときの無停止切り替えに使う。
+    fn swap_collections(&self, py: Python<'_>, a: &str, b: &str) -> PyResult<()> {
+        let (db, a, b) = (Arc::clone(&self.inner), a.to_owned(), b.to_owned());
+        py.allow_threads(move || db.swap_collections(&a, &b))
+            .map_err(to_py_err)
+    }
+
     fn drop_collection(&self, name: &str) -> PyResult<()> {
         self.inner.drop_collection(name).map_err(to_py_err)
     }

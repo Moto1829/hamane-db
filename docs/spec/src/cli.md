@@ -107,6 +107,17 @@ hamane info <DB_DIR>
 # {"collections":[{"name":"docs","dim":3,"metric":"Cosine","len":100}]}
 ```
 
+### rename / swap — 改名と差し替え
+
+```sh
+hamane rename <DB_DIR> <FROM> <TO>
+# {"renamed":"docs_v2","to":"docs_old"}
+
+# 索引を作り直したときの無停止切り替え (原子的)
+hamane swap <DB_DIR> <A> <B>
+# {"swapped":["docs","docs_v2"]}
+```
+
 ### flush / compact — メンテナンス
 
 ```sh

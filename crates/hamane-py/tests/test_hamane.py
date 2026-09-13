@@ -176,3 +176,26 @@ def test_update_meta(tmp_path):
     # 一括
     assert col.update_meta_by_filter({"eq": ["lang", "ja"]}, set={"reviewed": True}) == 20
     assert col.count({"eq": ["reviewed", True]}) == 20
+
+
+def test_rename_and_swap(tmp_path):
+    """改名と原子的な入れ替え (todo 1801)。"""
+    db = hamane.Database(str(tmp_path / "db"))
+    live = db.create_collection("docs", dim=2, metric="l2")
+    for i in range(3):
+        live.upsert(i, [float(i), 0.0])
+    staging = db.create_collection("docs_v2", dim=2, metric="l2")
+    for i in range(7):
+        staging.upsert(i, [float(i), 1.0])
+    db.flush()
+
+    # 無停止切り替え: 読み手は "docs" のまま新実体を見る
+    db.swap_collections("docs", "docs_v2")
+    assert len(db.collection("docs")) == 7
+    assert len(db.collection("docs_v2")) == 3
+
+    # 改名
+    db.rename_collection("docs_v2", "docs_old")
+    assert sorted(db.collection_names()) == ["docs", "docs_old"]
+    with pytest.raises(Exception):
+        db.rename_collection("docs_old", "docs")  # 既存名

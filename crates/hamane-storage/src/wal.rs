@@ -19,6 +19,10 @@ const TYPE_UPSERT: u8 = 1;
 const TYPE_DELETE: u8 = 2;
 const TYPE_CREATE_COLLECTION: u8 = 3;
 const TYPE_DROP_COLLECTION: u8 = 4;
+/// collection のリネーム (todo 1801)
+const TYPE_RENAME_COLLECTION: u8 = 5;
+/// 2 つの collection 名を原子的に入れ替える (todo 1801)
+const TYPE_SWAP_COLLECTION_NAMES: u8 = 6;
 
 /// WAL に記録される操作。vector は検証・正規化済みであること。
 #[derive(Debug, Clone, PartialEq)]
@@ -41,6 +45,19 @@ pub enum WalRecord {
     },
     DropCollection {
         collection_id: u32,
+    },
+    /// collection の改名 (todo 1801)
+    RenameCollection {
+        collection_id: u32,
+        new_name: String,
+    },
+    /// 2 つの collection の名前を**原子的に**入れ替える (todo 1801)。
+    ///
+    /// 「2 回のリネーム」で表現すると、WAL が途中で切れたときに名前が重複した
+    /// 壊れた状態になるので、1 レコードにしてある
+    SwapCollectionNames {
+        a: u32,
+        b: u32,
     },
 }
 
@@ -82,6 +99,19 @@ impl WalRecord {
                 format::put_u8(&mut body, TYPE_DROP_COLLECTION);
                 format::put_u32(&mut body, *collection_id);
             }
+            WalRecord::RenameCollection {
+                collection_id,
+                new_name,
+            } => {
+                format::put_u8(&mut body, TYPE_RENAME_COLLECTION);
+                format::put_u32(&mut body, *collection_id);
+                put_string(&mut body, new_name);
+            }
+            WalRecord::SwapCollectionNames { a, b } => {
+                format::put_u8(&mut body, TYPE_SWAP_COLLECTION_NAMES);
+                format::put_u32(&mut body, *a);
+                format::put_u32(&mut body, *b);
+            }
         }
         body
     }
@@ -114,6 +144,14 @@ impl WalRecord {
             },
             TYPE_DROP_COLLECTION => WalRecord::DropCollection {
                 collection_id: r.u32()?,
+            },
+            TYPE_RENAME_COLLECTION => WalRecord::RenameCollection {
+                collection_id: r.u32()?,
+                new_name: r.string()?,
+            },
+            TYPE_SWAP_COLLECTION_NAMES => WalRecord::SwapCollectionNames {
+                a: r.u32()?,
+                b: r.u32()?,
             },
             t => return Err(corrupted(format!("unknown WAL record type: {t}"))),
         };

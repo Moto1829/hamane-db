@@ -755,6 +755,28 @@ impl Store {
                     state.names.remove(&col.name);
                 }
             }
+            WalRecord::RenameCollection {
+                collection_id,
+                new_name,
+            } => {
+                let Some(col) = state.collections.get_mut(&collection_id) else {
+                    return Err(corrupted("WAL rename for unknown collection"));
+                };
+                let old_name = std::mem::replace(&mut col.name, new_name.clone());
+                state.names.remove(&old_name);
+                state.names.insert(new_name, collection_id);
+            }
+            WalRecord::SwapCollectionNames { a, b } => {
+                if !state.collections.contains_key(&a) || !state.collections.contains_key(&b) {
+                    return Err(corrupted("WAL swap for unknown collection"));
+                }
+                let name_a = state.collections[&a].name.clone();
+                let name_b = state.collections[&b].name.clone();
+                state.collections.get_mut(&a).unwrap().name = name_b.clone();
+                state.collections.get_mut(&b).unwrap().name = name_a.clone();
+                state.names.insert(name_b, a);
+                state.names.insert(name_a, b);
+            }
             WalRecord::Upsert {
                 collection_id,
                 id,
@@ -1009,6 +1031,65 @@ impl Store {
             t.wait()?;
         }
         Ok(existed)
+    }
+
+    /// collection を改名する (todo 1801)。
+    ///
+    /// 同名への改名は何もしない。改名先が既に使われていれば `CollectionExists`。
+    pub fn rename_collection(&self, from: &str, to: &str) -> Result<()> {
+        self.ensure_writable()?;
+        let token = {
+            let mut state = self.shared.state.lock().expect("lock poisoned");
+            let Some(&collection_id) = state.names.get(from) else {
+                return Err(HamaneError::CollectionNotFound(from.to_owned()));
+            };
+            if from == to {
+                return Ok(());
+            }
+            if state.names.contains_key(to) {
+                return Err(HamaneError::CollectionExists(to.to_owned()));
+            }
+            self.log_and_apply(
+                &mut state,
+                WalRecord::RenameCollection {
+                    collection_id,
+                    new_name: to.to_owned(),
+                },
+            )?
+        };
+        if let Some(t) = token {
+            t.wait()?;
+        }
+        Ok(())
+    }
+
+    /// 2 つの collection の名前を**原子的に**入れ替える (todo 1801)。
+    ///
+    /// 索引を作り直したときの無停止切り替えに使う。
+    /// 「2 回のリネーム」ではなく 1 WAL レコードなので、途中で落ちても
+    /// 名前が重複した状態にはならない。
+    pub fn swap_collection_names(&self, a: &str, b: &str) -> Result<()> {
+        self.ensure_writable()?;
+        let token = {
+            let mut state = self.shared.state.lock().expect("lock poisoned");
+            let Some(&id_a) = state.names.get(a) else {
+                return Err(HamaneError::CollectionNotFound(a.to_owned()));
+            };
+            let Some(&id_b) = state.names.get(b) else {
+                return Err(HamaneError::CollectionNotFound(b.to_owned()));
+            };
+            if id_a == id_b {
+                return Ok(());
+            }
+            self.log_and_apply(
+                &mut state,
+                WalRecord::SwapCollectionNames { a: id_a, b: id_b },
+            )?
+        };
+        if let Some(t) = token {
+            t.wait()?;
+        }
+        Ok(())
     }
 
     /// 複数 ID を 1 回の WAL sync でまとめて削除する (todo 1602)。

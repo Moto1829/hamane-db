@@ -77,6 +77,42 @@ impl Database {
         )))
     }
 
+    /// collection を改名する (todo 1801)。
+    ///
+    /// 同名への改名は何もしない。改名先が既に使われていれば `CollectionExists`、
+    /// 対象が無ければ `CollectionNotFound`。
+    ///
+    /// **既に取得済みの `Collection` ハンドルは古い名前を持ったまま**だが、
+    /// 内部 ID で動くので読み書きは問題なく続けられる。
+    pub fn rename_collection(&self, from: &str, to: &str) -> Result<()> {
+        self.store.rename_collection(from, to)
+    }
+
+    /// 2 つの collection の名前を**原子的に**入れ替える (todo 1801)。
+    ///
+    /// 索引を作り直したときの無停止切り替えに使う:
+    ///
+    /// ```
+    /// # use hamane::{CollectionConfig, Database, Metric, Record};
+    /// # fn main() -> hamane::Result<()> {
+    /// # let db = Database::in_memory();
+    /// # let cfg = CollectionConfig { dim: 2, metric: Metric::L2 };
+    /// # db.create_collection("docs", cfg)?;
+    /// // 新しい実体を作って投入しておく
+    /// let staging = db.create_collection("docs_v2", cfg)?;
+    /// staging.upsert(Record::new(1u64, vec![1.0, 0.0]))?;
+    ///
+    /// // 読み手が使う名前はそのままに、中身を差し替える
+    /// db.swap_collections("docs", "docs_v2")?;
+    /// assert_eq!(db.collection("docs")?.len(), 1);
+    /// // 旧実体は "docs_v2" として残るので、検証してから drop できる
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn swap_collections(&self, a: &str, b: &str) -> Result<()> {
+        self.store.swap_collection_names(a, b)
+    }
+
     /// データベースディレクトリ (in-memory なら None)。
     pub fn path(&self) -> Option<&Path> {
         self.store.db_dir()

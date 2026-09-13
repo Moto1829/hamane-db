@@ -44,8 +44,18 @@ body = type: u8 + payload
 | 2 | Delete | collection_id u32, id u64 |
 | 3 | CreateCollection | collection_id u32, name string, dim u32, metric u8 |
 | 4 | DropCollection | collection_id u32 |
+| 5 | RenameCollection | collection_id u32, new_name string |
+| 6 | SwapCollectionNames | a u32, b u32 |
 
 metric: 0 = L2, 1 = Cosine, 2 = Dot。
+
+型 5・6 は M18 で追加しました。新しいバイナリは古い WAL をそのまま読めます
+(既存の型の意味は変えていません)。古いバイナリで新しい WAL を読むことは
+想定していません (ダウングレードは元から保証範囲外)。
+
+`SwapCollectionNames` を「2 回の RenameCollection」で表現しないのは、WAL が
+途中で切れたときに**名前が重複した壊れた状態**になり得るためです。
+入れ替えは 1 レコードで原子的に適用します。
 metadata: `count u32` + (key string, tag u8 + 値) の列。
 tag: 0 = Str, 1 = Int(i64), 2 = Float(f64), 3 = Bool(u8)。
 

@@ -356,15 +356,19 @@ v0 は内部で upsert に落とす (WAL 量は変わらない)。メタデー�
 - Rust / HTTP (PATCH ×2) / CLI (`update-meta`) / Python (`update_meta`,
   `update_meta_by_filter`) に露出
 
-## M18: collection のリネームと入れ替え (2026-09-13 計画)
+## M18: collection のリネームと入れ替え (2026-09-13 完了)
 
 | # | タスク | Depends |
 |---|---|---|
-| ⬜ [1801](1801-rename-and-swap.md) | リネームと名前の原子的な入れ替え | 206, 207 |
+| ✅ [1801](1801-rename-and-swap.md) | リネームと名前の原子的な入れ替え | 206, 207 |
 
 索引を作り直したときの**無停止切り替え**のため。読み手は固定の名前を使い、
 裏で実体を差し替える。swap は「2 回のリネーム」ではなく 1 WAL レコードで
 原子的に行う (途中で切れると名前が重複した壊れた状態になるため)。
+
+WAL にタグ 5・6 を追加 (既存タグの意味は不変なので、新しいバイナリは
+古い WAL を読める)。Rust / HTTP (`/rename`, `/admin/collections/swap`) /
+CLI (`rename`, `swap`) / Python に露出。
 
 将来候補 (未タスク化): crates.io / PyPI 公開 (実装優先のため保留)、
 PQ4 の SIMD fast-scan

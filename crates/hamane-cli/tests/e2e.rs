@@ -413,3 +413,36 @@ fn cli_update_meta() {
         "--id と --filter の併用は失敗するべき"
     );
 }
+
+/// rename / swap (todo 1801)。
+#[test]
+fn cli_rename_and_swap() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let db_arg = path.to_str().unwrap();
+
+    run(&["create", db_arg, "docs", "--dim", "4", "--metric", "l2"]);
+    insert_jsonl(&path, "docs", &jsonl(5));
+    run(&["create", db_arg, "docs_v2", "--dim", "4", "--metric", "l2"]);
+    insert_jsonl(&path, "docs_v2", &jsonl(9));
+
+    // 無停止切り替え
+    let out = run(&["swap", db_arg, "docs", "docs_v2"]);
+    assert!(out.contains("\"swapped\""), "got {out}");
+    let out = run(&["count", db_arg, "docs"]);
+    assert!(out.contains("\"count\":9"), "got {out}");
+    let out = run(&["count", db_arg, "docs_v2"]);
+    assert!(out.contains("\"count\":5"), "got {out}");
+
+    // 改名
+    run(&["rename", db_arg, "docs_v2", "docs_old"]);
+    let out = run(&["count", db_arg, "docs_old"]);
+    assert!(out.contains("\"count\":5"), "got {out}");
+
+    // 既存名への改名は失敗する
+    let out = cli()
+        .args(["rename", db_arg, "docs_old", "docs"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "既存名への改名は失敗するべき");
+}

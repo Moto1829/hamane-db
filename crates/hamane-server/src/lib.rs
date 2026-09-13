@@ -15,6 +15,8 @@
 //! | DELETE | /collections/{name}/records/{id} | レコード削除 |
 //! | POST | /collections/{name}/search | 検索 (vector, k, ef, nprobe, threshold, filter) |
 //! | POST | /collections/{name}/search/batch | バッチ検索 (vectors: [[..], ..]) |
+//! | POST | /collections/{name}/rename | 改名 (body: {"to": ...}) |
+//! | POST | /admin/collections/swap | 2 名の原子的な入れ替え (body: {"a","b"}) |
 //! | POST | /admin/flush | フラッシュ |
 //! | POST | /admin/compact | コンパクション |
 //! | GET | /health | 死活確認 (**認証不要**。orchestrator の probe 用) |
@@ -82,6 +84,8 @@ pub fn router_with_auth(db: Arc<Database>, api_key: Option<String>) -> Router {
         )
         .route("/collections/{name}/search", post(search))
         .route("/collections/{name}/search/batch", post(search_batch))
+        .route("/collections/{name}/rename", post(rename_collection))
+        .route("/admin/collections/swap", post(swap_collections))
         .route("/admin/flush", post(flush))
         .route("/admin/compact", post(compact))
         .route("/replication/state", get(replication_state))
@@ -739,6 +743,45 @@ async fn update_records_meta(
         let col = db.collection(&name)?;
         let update = apply_patch(col.update_meta_by_filter(&filter), &body)?;
         Ok(Json(json!({ "updated": update.run()? })))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct RenameBody {
+    to: String,
+}
+
+/// collection の改名 (todo 1801)。
+async fn rename_collection(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<RenameBody>,
+) -> Result<Json<Value>, ApiError> {
+    let db = Arc::clone(&state.db);
+    blocking(move || {
+        db.rename_collection(&name, &body.to)?;
+        Ok(Json(json!({"renamed": name, "to": body.to})))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct SwapBody {
+    a: String,
+    b: String,
+}
+
+/// 2 つの collection 名を原子的に入れ替える (todo 1801)。
+/// 索引を作り直したときの無停止切り替えに使う。
+async fn swap_collections(
+    State(state): State<AppState>,
+    Json(body): Json<SwapBody>,
+) -> Result<Json<Value>, ApiError> {
+    let db = Arc::clone(&state.db);
+    blocking(move || {
+        db.swap_collections(&body.a, &body.b)?;
+        Ok(Json(json!({"swapped": [body.a, body.b]})))
     })
     .await
 }

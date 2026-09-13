@@ -132,6 +132,15 @@ enum Command {
         #[arg(long)]
         filter: String,
     },
+    /// collection を改名する (todo 1801)
+    Rename {
+        db: PathBuf,
+        from: String,
+        to: String,
+    },
+    /// 2 つの collection 名を原子的に入れ替える (todo 1801)。
+    /// 索引を作り直したときの無停止切り替えに使う
+    Swap { db: PathBuf, a: String, b: String },
     /// 一貫性のあるバックアップを取る (dest は空ディレクトリ)
     Backup { db: PathBuf, dest: PathBuf },
 }
@@ -321,6 +330,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let col = db.collection(&collection)?;
             let f = parse_filter(&serde_json::from_str(&filter)?)?;
             println!("{}", json!({"deleted": col.delete_by_filter(&f)?}));
+        }
+        Command::Rename { db, from, to } => {
+            let db = Database::open(&db)?;
+            db.rename_collection(&from, &to)?;
+            println!("{}", json!({"renamed": from, "to": to}));
+        }
+        Command::Swap { db, a, b } => {
+            let db = Database::open(&db)?;
+            db.swap_collections(&a, &b)?;
+            println!("{}", json!({"swapped": [a, b]}));
         }
         Command::Info { db } => {
             let db = Database::open(&db)?;
