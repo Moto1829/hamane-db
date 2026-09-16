@@ -1,5 +1,11 @@
 # 永続化と耐久性
 
+> ここでは [WAL](glossary.md#wal-先行書き込みログ) /
+> [memtable](glossary.md#memtable) / [セグメント](glossary.md#セグメント-segment) /
+> [manifest](glossary.md#manifest) /
+> [コンパクション](glossary.md#コンパクション-compaction) といった言葉を使います。
+> それぞれ 2〜3 行の説明が [用語集](glossary.md) にあります。
+
 ## 書き込みパス
 
 ```text

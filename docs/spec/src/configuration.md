@@ -1,5 +1,8 @@
 # 設定リファレンス
 
+> `ef` / `nprobe` / `quantization` などの意味は [用語集](glossary.md) にも
+> 短くまとめてあります。
+
 ## StoreOptions
 
 `Database::open_with_options(path, options)` で指定します。

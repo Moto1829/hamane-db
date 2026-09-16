@@ -20,7 +20,9 @@ Rust 製の組み込み型ベクトルデータベースエンジン。
   quickstart / フィルタ / 大量投入 / **量子化構成の比較** / バックアップ /
   並行アクセス / RAG / 推薦 (`cargo run --example quickstart`)
 - **仕様書**: [docs/spec/](docs/spec/) (mdBook。`mdbook serve docs/spec` でローカル閲覧、
-  GitHub Pages で公開)
+  [GitHub Pages で公開](https://moto1829.github.io/hamane-db/))。
+  **知らない言葉が出てきたら** [用語集](https://moto1829.github.io/hamane-db/glossary.html)
+  へ (埋め込み / セグメント / WAL / 量子化 などを 2〜3 行で説明)
 - 設計の背景: [docs/DESIGN.md](docs/DESIGN.md) / 実装タスク: [todos/](todos/)
 
 ## ベクトルDBとは
